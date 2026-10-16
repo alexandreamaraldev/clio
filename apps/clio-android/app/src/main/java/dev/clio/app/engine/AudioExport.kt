@@ -46,21 +46,26 @@ object AudioExport {
         return EditedMediaItem.Builder(MediaItem.fromUri(android.net.Uri.fromFile(f))).build()
     }
 
-    /** 44.1 kHz stereo 16-bit silent WAV of [ms] (cached by length). */
+    /** 44.1 kHz stereo 16-bit silent WAV of [ms], cached by length. Written to a temp file and renamed so a
+     *  crash mid-write never leaves a truncated file that later looks valid; the size is checked on reuse. */
     internal fun silenceWav(dir: File, ms: Long): File {
-        val f = File(dir, "silence-$ms.wav")
-        if (f.exists()) return f
         val frames = RATE * ms / 1000
-        val data = (frames * 4).toInt()
-        DataOutputStream(f.outputStream().buffered()).use { o ->
-            fun le32(v: Int) { o.write(v and 255); o.write(v shr 8 and 255); o.write(v shr 16 and 255); o.write(v ushr 24) }
-            fun le16(v: Int) { o.write(v and 255); o.write(v shr 8 and 255) }
-            o.writeBytes("RIFF"); le32(36 + data); o.writeBytes("WAVEfmt "); le32(16); le16(1); le16(2); le32(RATE.toInt()); le32(RATE.toInt() * 4); le16(4); le16(16)
-            o.writeBytes("data"); le32(data)
-            val zeros = ByteArray(8192)
-            var left = data
-            while (left > 0) { val n = minOf(left, zeros.size); o.write(zeros, 0, n); left -= n }
-        }
+        val data = frames * 4
+        val f = File(dir, "silence-$ms.wav")
+        if (f.length() == 44 + data) return f
+        val tmp = File.createTempFile("silence-$ms", ".tmp", dir)
+        try {
+            DataOutputStream(tmp.outputStream().buffered()).use { o ->
+                fun le32(v: Long) { for (i in 0 until 4) o.write((v shr (8 * i)).toInt() and 255) }
+                fun le16(v: Int) { o.write(v and 255); o.write(v shr 8 and 255) }
+                o.writeBytes("RIFF"); le32(36 + data); o.writeBytes("WAVEfmt "); le32(16); le16(1); le16(2); le32(RATE); le32(RATE * 4); le16(4); le16(16)
+                o.writeBytes("data"); le32(data)
+                val zeros = ByteArray(8192)
+                var left = data
+                while (left > 0) { val n = minOf(left, zeros.size.toLong()).toInt(); o.write(zeros, 0, n); left -= n }
+            }
+            if (!tmp.renameTo(f)) { f.delete(); check(tmp.renameTo(f)) { "rename ${tmp.name}" } }
+        } finally { tmp.delete() }
         return f
     }
 

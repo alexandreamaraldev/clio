@@ -33,6 +33,7 @@ class ScreensTest {
     @Test fun editorVolume() = shot(ThemeMode.Light) { EditorScreen(ui(), { 2.4f }, initialTool = TOOL_VOLUME) }
     @Test fun editorFormat() = shot(ThemeMode.Dark) { EditorScreen(ui().copy(canvasW = 1080, canvasH = 1080, blurBg = true), { 2.4f }, initialTool = TOOL_FORMAT) }
     @Test fun editorMusic() = shot(ThemeMode.Light) { EditorScreen(ui().copy(music = "Lo-fi morning"), { 2.4f }, initialTool = TOOL_MUSIC) }
+    @Test fun editorAudioDark() = shot(ThemeMode.Dark) { EditorScreen(ui().copy(music = "Lo-fi morning"), { 2.4f }, initialTool = TOOL_MUSIC) }
     @Test fun exportChoose() = shot(ThemeMode.Dark) { ExportSheet(dev.clio.app.engine.ExportState.Choosing, {}, {}, {}) }
     @Test fun exportDone() = shot(ThemeMode.Light) { ExportSheet(dev.clio.app.engine.ExportState.Done(android.net.Uri.EMPTY), {}, {}, {}) }
     @Test fun exportProgress() = shot(ThemeMode.Dark) { ExportSheet(dev.clio.app.engine.ExportState.Running(0.62f, "Stories / Reels / TikTok"), {}, {}, {}) }

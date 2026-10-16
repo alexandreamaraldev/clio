@@ -30,6 +30,13 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import dev.clio.app.engine.SfxLibrary
 import dev.clio.app.ui.components.pressable
+import dev.clio.app.ui.components.rememberHaptics
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.ui.graphics.Color
+import androidx.compose.animation.core.animateFloatAsState
+import kotlinx.coroutines.delay
 import dev.clio.app.ui.theme.ClioColors
 import dev.clio.app.ui.theme.ClioMotion
 import dev.clio.app.ui.theme.ClioShapes
@@ -45,11 +52,15 @@ fun AudioPanel(
     onPickMusic: () -> Unit, onRemoveMusic: () -> Unit, onRecord: () -> Unit, onDetach: () -> Unit, onSfx: (String) -> Unit,
 ) {
     var credits by remember { mutableStateOf(false) }
-    Column(Modifier.fillMaxWidth().height(220.dp).padding(horizontal = Space.md)) {
-        Text("Áudio", style = MaterialTheme.typography.titleMedium, color = ClioColors.TextPrimary)
+    val haptics = rememberHaptics()
+    Column(Modifier.fillMaxWidth().heightIn(min = 220.dp).padding(horizontal = Space.md)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("Áudio", style = MaterialTheme.typography.titleMedium, color = ClioColors.TextPrimary, modifier = Modifier.weight(1f))
+            if (recording) RecordingTimer()
+        }
         Spacer(Modifier.height(Space.sm))
-        Row(horizontalArrangement = Arrangement.spacedBy(Space.sm)) {
-            AudioAction(Icons.Outlined.LibraryMusic, if (music == null) "Música" else "Trocar", tag = "audio-music", onClick = onPickMusic)
+        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(Space.sm)) {
+            AudioAction(Icons.Outlined.LibraryMusic, if (music == null) "Música" else "Trocar música", tag = "audio-music", onClick = onPickMusic)
             AudioAction(if (recording) Icons.Rounded.Stop else Icons.Outlined.Mic, if (recording) "Parar" else "Narração", active = recording, tag = "audio-record", onClick = onRecord)
             AudioAction(Icons.Outlined.CallSplit, "Separar áudio", enabled = canDetach, tag = "audio-detach", onClick = onDetach)
         }
@@ -68,7 +79,7 @@ fun AudioPanel(
         }
         Spacer(Modifier.height(Space.xs))
         LazyRow(horizontalArrangement = Arrangement.spacedBy(Space.xs), modifier = Modifier.testTag("sfx")) {
-            items(SfxLibrary.all) { s -> Choice(s.label, selected = false) { onSfx(s.id) } }
+            items(SfxLibrary.all) { s -> Choice(s.label, selected = false) { haptics.click(); onSfx(s.id) } }
         }
     }
     if (credits) AlertDialog(
@@ -103,17 +114,63 @@ private fun AudioAction(icon: ImageVector, label: String, enabled: Boolean = tru
     }
 }
 
+/** Red dot + elapsed time while the mic is live. */
+@Composable
+private fun RecordingTimer() {
+    val start = remember { android.os.SystemClock.elapsedRealtime() }
+    var now by remember { mutableLongStateOf(start) }
+    LaunchedEffect(Unit) { while (true) { now = android.os.SystemClock.elapsedRealtime(); delay(250) } }
+    val s = (now - start) / 1000
+    Row(Modifier.testTag("rec-timer"), verticalAlignment = Alignment.CenterVertically) {
+        Box(Modifier.size(8.dp).clip(CircleShape).background(RecordRed))
+        Spacer(Modifier.width(6.dp))
+        Text("%d:%02d".format(s / 60, s % 60), style = MaterialTheme.typography.labelLarge, color = ClioColors.TextPrimary)
+    }
+}
+
+private val RecordRed = Color(0xFFE5484D)
+
+/** Explains the mic before asking; after a permanent denial, points to the system Settings. */
+@Composable
+fun MicPermissionDialog(permanent: Boolean, onAllow: () -> Unit, onSettings: () -> Unit, onDismiss: () -> Unit) = AlertDialog(
+    onDismissRequest = onDismiss,
+    confirmButton = {
+        TextButton(if (permanent) onSettings else onAllow) { Text(if (permanent) "Abrir configurações" else "Permitir", color = ClioColors.ClayText) }
+    },
+    dismissButton = { TextButton(onDismiss) { Text("Agora não", color = ClioColors.TextSecondary) } },
+    title = { Text("Microfone para narração") },
+    text = {
+        Text(if (permanent) "O acesso ao microfone está desativado. Ative em Configurações > Permissões para gravar narrações."
+        else "O Clio usa o microfone só enquanto você grava uma narração. Nada sai do seu aparelho.")
+    },
+)
+
+/** Waveform for an audio clip: real peaks fade in once decoded; [placeholder] until then. */
+@Composable
+fun ClipWaveform(c: UiClip, modifier: Modifier, placeholder: @Composable (Modifier) -> Unit) {
+    val key = remember(c.id, c.source, c.inS, c.lenS, c.speed) {
+        dev.clio.app.engine.Waveforms.key(c.id, c.source, Math.round(c.inS * 1000.0), dev.clio.app.engine.Mix.spanMs(Math.round(c.lenS * 1000.0), c.speed))
+    }
+    val peaks = remember(key) { dev.clio.app.engine.Waveforms.state(key) }.value
+    val a by animateFloatAsState(if (peaks != null) 1f else 0f, ClioMotion.fade(), label = "wave")
+    if (peaks == null || a < 1f) placeholder(modifier.graphicsLayer { alpha = 1f - a })
+    if (peaks != null) PeaksWaveform(peaks, modifier.graphicsLayer { alpha = a })
+}
+
 /** Real waveform bars from engine peaks (0..1), stretched to the clip width. */
 @Composable
-fun PeaksWaveform(peaks: List<Float>, modifier: Modifier) {
+fun PeaksWaveform(peaks: FloatArray, modifier: Modifier) {
     val c = ClioColors.TextTertiary.copy(alpha = 0.6f)
     Canvas(modifier) {
         if (peaks.isEmpty()) return@Canvas
-        val n = (size.width / 4f).toInt().coerceAtLeast(1)
+        val step = 3.dp.toPx()
+        val bar = 1.5.dp.toPx()
+        val n = (size.width / step).toInt().coerceAtLeast(1)
         for (i in 0 until n) {
             val a = peaks[(i.toLong() * peaks.size / n).toInt().coerceIn(0, peaks.size - 1)].coerceIn(0.04f, 1f)
             val h = size.height * a
-            drawLine(c, Offset(i * 4f + 2f, (size.height - h) / 2), Offset(i * 4f + 2f, (size.height + h) / 2), 2f)
+            val x = i * step + step / 2
+            drawLine(c, Offset(x, (size.height - h) / 2), Offset(x, (size.height + h) / 2), bar)
         }
     }
 }

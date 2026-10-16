@@ -12,9 +12,9 @@ object SfxLibrary {
     data class Credit(val title: String, val author: String, val license: String, val url: String)
 
     val all = listOf(
-        Sfx("confirmation_001", "Sucesso", 290), Sfx("select_003", "Seleção", 383), Sfx("switch_002", "Swoosh", 611),
-        Sfx("pluck_001", "Pluck", 102), Sfx("bong_001", "Bong", 123), Sfx("glass_001", "Vidro", 278),
-        Sfx("drop_002", "Gota", 191), Sfx("maximize_003", "Subida", 212), Sfx("scratch_002", "Scratch", 139),
+        Sfx("confirmation_001", "Sucesso", 290), Sfx("select_003", "Seleção", 383), Sfx("switch_002", "Deslizar", 611),
+        Sfx("pluck_001", "Toque", 102), Sfx("bong_001", "Gongo", 123), Sfx("glass_001", "Vidro", 278),
+        Sfx("drop_002", "Gota", 191), Sfx("maximize_003", "Subida", 212), Sfx("scratch_002", "Arranhão", 139),
         Sfx("toggle_001", "Clique", 139),
     )
 

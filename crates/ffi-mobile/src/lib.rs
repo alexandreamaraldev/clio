@@ -60,6 +60,9 @@ pub struct Clip {
     pub fade_out_ms: u64,
     #[serde(default)]
     pub muted: bool,
+    /// Video clips only: id of the audio clip its sound was detached to (the video plays silent).
+    #[serde(default)]
+    pub detached_to: Option<u64>,
 }
 
 fn one() -> f32 {
@@ -73,7 +76,7 @@ pub const MIN_CLIP_MS: u64 = 100;
 
 impl Clip {
     fn new(id: u64, name: String, source: String, start_ms: u64, duration_ms: u64) -> Self {
-        Clip { id, name, source, start_ms, duration_ms, in_ms: 0, source_ms: 0, width: 0, height: 0, speed: 1.0, volume: 1.0, fade_in_ms: 0, fade_out_ms: 0, muted: false }
+        Clip { id, name, source, start_ms, duration_ms, in_ms: 0, source_ms: 0, width: 0, height: 0, speed: 1.0, volume: 1.0, fade_in_ms: 0, fade_out_ms: 0, muted: false, detached_to: None }
     }
     /// Source span consumed by this clip.
     fn span_ms(&self) -> u64 {
@@ -188,6 +191,7 @@ impl State {
             c.start_ms = at;
             at += c.duration_ms;
         }
+        self.sync_links();
     }
     fn max_id(&self) -> u64 {
         self.tracks.iter().flat_map(|t| std::iter::once(t.id).chain(t.clips.iter().map(|c| c.id))).max().unwrap_or(0)
@@ -368,6 +372,7 @@ impl ClioProject {
         s.next_id += 1;
         let mut c = s.tracks[ti].clips[ci].clone();
         c.id = id;
+        c.detached_to = None;
         c.start_ms += c.duration_ms;
         s.tracks[ti].clips.insert(ci + 1, c);
         s.relayout(ti);
@@ -507,6 +512,7 @@ impl ClioProject {
         for c in &mut t.clips[ci..] {
             c.start_ms = c.start_ms.saturating_sub(gone.duration_ms);
         }
+        s.remove_linked(&gone);
         true
     }
 
@@ -565,6 +571,7 @@ impl ClioProject {
                 };
                 t.clips.insert(i + 1, right);
                 s.next_id += 1;
+                s.sync_links();
                 s.history.undo.push(before);
                 s.history.redo.clear();
                 return Ok(new_id);

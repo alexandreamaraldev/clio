@@ -110,7 +110,7 @@ class Exporter(private val context: Context) {
         }
         val seqs = mutableListOf(EditedMediaItemSequence(items))
         seqs += AudioExport.sequences(context, snap, totalMs, ::audioChain)
-        return Composition.Builder(seqs).build()
+        return Composition.Builder(seqs).experimentalSetForceAudioTrack(true).build()
     }
 
     private suspend fun run(composition: Composition, out: File, onProgress: (Float) -> Unit) = coroutineScope {
@@ -166,8 +166,8 @@ class Exporter(private val context: Context) {
     /** Speed (pitch kept) then volume × fade envelope. */
     private fun audioChain(c: uniffi.clio_ffi.Clip, speed: Float): List<AudioProcessor> = buildList {
         if (speed != 1f) add(SonicAudioProcessor().apply { setSpeed(speed); setPitch(1f) })
-        if (c.muted || c.volume != 1f || c.fadeInMs > 0u || c.fadeOutMs > 0u)
-            add(GainProcessor(c.durationMs.toLong(), c.volume, c.fadeInMs.toLong(), c.fadeOutMs.toLong(), c.muted))
+        if (AudioGain.silent(c) || c.volume != 1f || c.fadeInMs > 0u || c.fadeOutMs > 0u)
+            add(GainProcessor(c.durationMs.toLong(), c.volume, c.fadeInMs.toLong(), c.fadeOutMs.toLong(), AudioGain.silent(c)))
     }
 
     private data class Timed(val startMs: Long, val endMs: Long, val text: String)
@@ -218,7 +218,7 @@ private class GainProcessor(private val durMs: Long, private val volume: Float, 
         val src = input.order(ByteOrder.nativeOrder())
         while (src.remaining() >= 2 * ch) {
             val g = Mix.gain(frames * 1000 / rate, durMs, volume, fadeInMs, fadeOutMs, muted)
-            repeat(ch) { out.putShort((src.short * g).toInt().coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort()) }
+            repeat(ch) { out.putShort((AudioGain.limit(src.short * g / 32768f) * 32767f).toInt().toShort()) }
             frames++
         }
         input.position(input.limit())
