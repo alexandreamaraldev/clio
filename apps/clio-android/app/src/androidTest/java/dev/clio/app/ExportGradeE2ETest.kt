@@ -222,14 +222,16 @@ class ExportGradeE2ETest {
     }
 
     /**
-     * Agreed contract for outcome (b), from Timeline's code at 0c69dc8 (no fallback-chain commit yet):
-     * the failure text is ExportState.Failed.message shown verbatim on the export sheet, and like every
-     * HDR notice in HdrProbe/Exporter it starts with "Vídeo HDR". It must be user-facing pt-BR, never a
-     * raw exception chain (today it is "Video frame processing error ← ... GL_EXT_YUV_target ...").
+     * Outcome (b) contract, from Timeline's fallback chain in b58ddf0 (Exporter.kt): after CODEC -> GL ->
+     * AS_SDR -> DROP all fail, export throws IllegalStateException([HDR_ERROR]), which EditorController
+     * shows on the export sheet as ExportState.Failed.message (cause chain joined with " ← "). No testTag
+     * exists, so the exact sentence is the stable match.
      */
+    private val HDR_ERROR = "Não foi possível exportar este vídeo HDR neste aparelho. Tente remover os filtros dos clipes."
+
     private fun assertPtBrHdrError(msg: String, label: String) {
-        assertTrue("$label: export failed with a raw error instead of the pt-BR HDR message: \"$msg\"",
-            msg.startsWith("Vídeo HDR") && listOf("Exception", "GL_", "←", "error").none { msg.contains(it) })
+        assertTrue("$label: export failed with something other than the pt-BR HDR error: \"$msg\"", msg.startsWith(HDR_ERROR))
+        if (msg != HDR_ERROR) android.util.Log.w("ClioQA", "CLIO-QA grade-hdr $label: raw cause chain appended in UI: \"${msg.removePrefix(HDR_ERROR)}\"")
     }
 
     private fun assertNoCrash(label: String) {
@@ -255,7 +257,7 @@ class ExportGradeE2ETest {
             is ExportState.Failed -> {
                 android.util.Log.i("ClioQA", "CLIO-QA grade-hdr $label: outcome=error \"${st.message}\"")
                 assertPtBrHdrError(st.message, label)
-                compose.onNodeWithText(st.message).assertIsDisplayed()
+                compose.onNodeWithText(HDR_ERROR, substring = true).assertIsDisplayed()
                 compose.onNodeWithText("Fechar").performClick()
                 compose.waitUntil(10_000) { QaHooks.export is ExportState.Closed }
                 // Editor still usable: undo the grade, then redo it.
