@@ -72,4 +72,68 @@ class ExportGradeE2ETest {
         assertTrue("P&B should differ from plain: $line", plainSpreadA < 6.0 || pbSpread < plainSpreadA * 0.5)
         assertTrue("brightness not applied: $line", brightLuma > plainLumaB + 12)
     }
+
+    // --- every preset and every slider against the CPU reference (Grades.grade) ---
+
+    /** Swatch bands of the synthetic still: grey, red, skin, blue (top to bottom). */
+    private val swatches = intArrayOf(0x808080, 0xC8503C, 0xDCAA8C, 0x325AB4)
+
+    private fun swatchStill(): String {
+        val w = 720; val h = 1280
+        val b = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val c = android.graphics.Canvas(b); val paint = android.graphics.Paint()
+        swatches.forEachIndexed { i, rgb -> paint.color = 0xFF000000.toInt() or rgb; c.drawRect(0f, (i * h / 4).toFloat(), w.toFloat(), ((i + 1) * h / 4).toFloat(), paint) }
+        val f = File(ctx.cacheDir, "swatches.png"); f.outputStream().use { b.compress(Bitmap.CompressFormat.PNG, 100, it) }
+        return Uri.fromFile(f).toString()
+    }
+
+    /** Mean RGB of a 48x48 patch at the centre of swatch band [i]. */
+    private fun patch(f: Bitmap, i: Int): IntArray {
+        val cx = f.width / 2; val cy = f.height * (2 * i + 1) / 8; var r = 0; var g = 0; var b = 0; var n = 0
+        for (y in cy - 24 until cy + 24) for (x in cx - 24 until cx + 24) { val p = f.getPixel(x, y); r += (p shr 16) and 255; g += (p shr 8) and 255; b += p and 255; n++ }
+        return intArrayOf(r / n, g / n, b / n)
+    }
+
+    private fun reference(rgb: Int, g: uniffi.clio_ffi.ColorGrade, lib: Grades.Library): IntArray {
+        val c = floatArrayOf(((rgb shr 16) and 255) / 255f, ((rgb shr 8) and 255) / 255f, (rgb and 255) / 255f)
+        Grades.grade(c, g, lib.cube(g.filter))
+        return IntArray(3) { (c[it] * 255f + 0.5f).toInt() }
+    }
+
+    @Test fun everyPresetAndSliderMatchesReference() {
+        val n = Grades.NEUTRAL
+        val cases = listOf("neutral" to n) +
+            dev.clio.app.engine.LookPresets.all.map { (id, _) -> id to n.copy(filter = id) } +
+            listOf(
+                "vivido@50%" to n.copy(filter = "vivido", intensity = 0.5f),
+                "brightness+0.6" to n.copy(brightness = 0.6f), "brightness-0.6" to n.copy(brightness = -0.6f),
+                "contrast+0.8" to n.copy(contrast = 0.8f), "saturation-1" to n.copy(saturation = -1f),
+                "saturation+0.8" to n.copy(saturation = 0.8f), "temperature+1" to n.copy(temperature = 1f),
+                "temperature-1" to n.copy(temperature = -1f), "highlights-1" to n.copy(highlights = -1f),
+                "shadows+1" to n.copy(shadows = 1f),
+            )
+        // One export: one 1 s still clip per case, each with its own grade.
+        val still = swatchStill()
+        val p = ClioProject("grade-ref", 720u, 1280u)
+        val v = p.addTrack(TrackKind.VIDEO, "V")
+        cases.forEach { (name, g) -> val id = p.appendClip(v, name, still, 1000u); p.setClipSourceInfo(id, 0u, 720u, 1280u); p.setClipGrade(id, g) }
+        val uri = runBlocking { withTimeout(240_000) { Exporter(ctx).export(p.snapshot(), ExportSpec("grade-ref", 720, 1280, 30), CaptionStyle.Clean) {} } }
+
+        val lib = Grades.Library(ctx); val tol = 14
+        val m = MediaMetadataRetriever(); m.setDataSource(ctx, uri)
+        val fails = mutableListOf<String>()
+        try {
+            cases.forEachIndexed { k, (name, g) ->
+                val f = m.getFrameAtTime((k * 1000L + 500) * 1000, MediaMetadataRetriever.OPTION_CLOSEST)!!.copy(Bitmap.Config.ARGB_8888, false)
+                swatches.forEachIndexed { i, rgb ->
+                    val got = patch(f, i); val want = reference(rgb, g, lib)
+                    val err = (0..2).maxOf { kotlin.math.abs(got[it] - want[it]) }
+                    val line = "CLIO-QA grade-ref $name swatch$i: got ${got.joinToString(",")} want ${want.joinToString(",")} err $err"
+                    android.util.Log.i("ClioQA", line)
+                    if (err > tol) fails += line
+                }
+            }
+        } finally { m.release() }
+        assertTrue("${fails.size} patches off by > $tol:\n" + fails.joinToString("\n"), fails.isEmpty())
+    }
 }
