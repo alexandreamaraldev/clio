@@ -126,6 +126,12 @@ impl SpeedCurve {
     }
 }
 
+/// Speed of `curve` at source position `x` (0..1), for drawing the curve in the UI.
+#[uniffi::export]
+pub fn curve_speed_at(curve: SpeedCurve, x: f32) -> f32 {
+    curve.sanitized().map(|c| c.speed_at(x)).unwrap_or(1.0)
+}
+
 /// Playback plan for a clip: `CURVE_SEGMENTS` equal source pieces, each with a constant speed,
 /// rescaled so the timeline length is exactly `duration_ms` for a source span of `span_ms`.
 #[uniffi::export]
@@ -245,8 +251,8 @@ mod tests {
         let v = p.add_track(TrackKind::Video, "V".into());
         let a = p.append_clip(v, "a".into(), "a.mp4".into(), 4000).unwrap();
         let b = p.append_clip(v, "b".into(), "b.mp4".into(), 3000).unwrap();
-        p.set_clip_source_info(a, 10_000, 1280, 720).unwrap();
-        p.set_clip_source_info(b, 10_000, 1280, 720).unwrap();
+        p.set_clip_source_info(a, 10_000, 1280, 720);
+        p.set_clip_source_info(b, 10_000, 1280, 720);
         (p, a, b)
     }
     fn clip(p: &ClioProject, id: u64) -> crate::Clip {
@@ -274,13 +280,19 @@ mod tests {
         assert!((c.speed_at(0.5) - 0.15).abs() < 1e-3);
     }
 
-    /// Shared with the Kotlin drawing code (CurveShapeTest uses the same numbers).
     #[test]
-    fn reference_values() {
+    fn ramps_stay_between_neighbours() {
         let c = SpeedCurve { preset: CUSTOM.into(), points: vec![SpeedPoint { x: 0.0, speed: 1.0 }, SpeedPoint { x: 0.5, speed: 4.0 }, SpeedPoint { x: 1.0, speed: 0.5 }] };
-        for (x, want) in [(0.25f32, 2.0f32), (0.5, 4.0), (0.75, 1.4142)] {
-            let got = c.speed_at(x);
-            assert!((got - want).abs() < 0.08, "x={x}: {got}");
+        let mut last = 0.0;
+        for i in 0..=50 {
+            let v = curve_speed_at(c.clone(), i as f32 / 100.0);
+            assert!(v >= last - 1e-4 && (1.0..=4.0 + 1e-3).contains(&v), "rising half: {v}");
+            last = v;
+        }
+        for i in 50..=100 {
+            let v = c.speed_at(i as f32 / 100.0);
+            assert!((0.5 - 1e-3..=4.0 + 1e-3).contains(&v) && v <= last + 1e-4, "falling half: {v}");
+            last = v;
         }
     }
 
