@@ -15,6 +15,9 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.unit.dp
 import dev.clio.app.engine.Engine
 import dev.clio.app.engine.ExportSpec
+import dev.clio.app.engine.ExportRes
+import dev.clio.app.engine.Mix
+import androidx.compose.runtime.saveable.rememberSaveable
 import dev.clio.app.engine.ExportState
 import dev.clio.app.ui.components.*
 import dev.clio.app.ui.theme.ClioColors
@@ -22,10 +25,14 @@ import dev.clio.app.ui.theme.ClioMotion
 import dev.clio.app.ui.theme.ClioShapes
 import dev.clio.app.ui.theme.Space
 
-fun exportSpecs(): List<ExportSpec> =
-    Engine.presets().map { ExportSpec(it.label, it.width.toInt(), it.height.toInt(), it.fps.toInt()) }
-        .ifEmpty { listOf(ExportSpec("Stories / Reels / TikTok", 1080, 1920, 30), ExportSpec("YouTube 1080p", 1920, 1080, 30)) }
-        .filter { it.width * it.height <= 1920 * 1080 } // 4K encode is too slow/unsupported on many phones for now
+/** Export size for the project canvas at a resolution (short side) and frame rate. */
+fun exportSpec(canvasW: Int, canvasH: Int, res: ExportRes, fps: Int): ExportSpec {
+    val g = gcd(canvasW, canvasH).coerceAtLeast(1)
+    val (w, h) = Mix.canvas(canvasW / g, canvasH / g, res.shortSide)
+    return ExportSpec("${res.label} · $fps fps", w, h, fps)
+}
+
+private tailrec fun gcd(a: Int, b: Int): Int = if (b == 0) a else gcd(b, a % b)
 
 /** Export sheet: preset picker → real progress (Clio "working") → saved to gallery (Clio "happy" + haptic). */
 @Composable
@@ -34,11 +41,14 @@ fun ExportSheet(
     onStart: (ExportSpec) -> Unit,
     onShare: (android.net.Uri) -> Unit,
     onClose: () -> Unit,
+    canvasW: Int = 1080,
+    canvasH: Int = 1920,
 ) {
     val haptics = rememberHaptics()
     BackHandler(onBack = onClose)
-    val presets = remember { exportSpecs() }
-    var choice by remember { mutableIntStateOf(0) }
+    var res by rememberSaveable { mutableStateOf(ExportRes.P1080) }
+    var fps by rememberSaveable { mutableIntStateOf(30) }
+    val spec = exportSpec(canvasW, canvasH, res, fps)
     LaunchedEffect(state is ExportState.Done) { if (state is ExportState.Done) haptics.confirm() }
 
     Box(Modifier.fillMaxSize().background(ClioColors.Scrim).pressable(role = androidx.compose.ui.semantics.Role.Button, onClick = {
@@ -56,26 +66,22 @@ fun ExportSheet(
                 if (st is ExportState.Choosing || st is ExportState.Closed) Column {
                     Text("Exportar", style = MaterialTheme.typography.headlineMedium, color = ClioColors.TextPrimary)
                     Spacer(Modifier.height(Space.md))
-                    presets.forEachIndexed { i, p ->
-                        val sel = i == choice
-                        Row(
-                            Modifier.fillMaxWidth().padding(vertical = 4.dp).pressable(role = androidx.compose.ui.semantics.Role.RadioButton, onClick = { choice = i })
-                                .clip(ClioShapes.md).background(if (sel) ClioColors.SurfaceRaised else ClioColors.Surface)
-                                .border(1.dp, if (sel) ClioColors.HairlineStrong else ClioColors.Hairline, ClioShapes.md).padding(Space.md),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Column(Modifier.weight(1f)) {
-                                Text(p.label, style = MaterialTheme.typography.titleMedium, color = ClioColors.TextPrimary)
-                                Text("${p.width}×${p.height} · ${p.fps} fps", style = MaterialTheme.typography.labelMedium, color = ClioColors.TextTertiary)
-                            }
-                            val dot by animateDpAsState(if (sel) 10.dp else 0.dp, ClioMotion.snappy(), label = "d")
-                            Box(Modifier.size(18.dp).clip(ClioShapes.pill).border(1.dp, ClioColors.HairlineStrong, ClioShapes.pill), contentAlignment = Alignment.Center) {
-                                Box(Modifier.size(dot).clip(ClioShapes.pill).background(ClioColors.Primary))
-                            }
-                        }
+                    Text("Resolução", style = MaterialTheme.typography.labelMedium, color = ClioColors.TextSecondary)
+                    Spacer(Modifier.height(Space.sm))
+                    Row(horizontalArrangement = Arrangement.spacedBy(Space.sm)) {
+                        ExportRes.entries.forEach { r -> Choice(r.label, r == res, Modifier.weight(1f)) { res = r } }
                     }
+                    Spacer(Modifier.height(Space.md))
+                    Text("Quadros por segundo", style = MaterialTheme.typography.labelMedium, color = ClioColors.TextSecondary)
+                    Spacer(Modifier.height(Space.sm))
+                    Row(horizontalArrangement = Arrangement.spacedBy(Space.sm)) {
+                        listOf(24, 30, 60).forEach { f -> Choice("$f", f == fps, Modifier.weight(1f)) { fps = f } }
+                    }
+                    Spacer(Modifier.height(Space.md))
+                    Text("${spec.width}×${spec.height} · ${spec.fps} fps" + if (res == ExportRes.K4) " · 4K pode ser reduzido se o aparelho não suportar" else "",
+                        style = MaterialTheme.typography.labelMedium, color = ClioColors.TextTertiary)
                     Spacer(Modifier.height(Space.lg))
-                    PrimaryButton("Exportar vídeo", Modifier.fillMaxWidth()) { onStart(presets[choice]) }
+                    PrimaryButton("Exportar vídeo", Modifier.fillMaxWidth()) { onStart(spec) }
                 } else Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
                     val done = st is ExportState.Done
                     val failed = st is ExportState.Failed
