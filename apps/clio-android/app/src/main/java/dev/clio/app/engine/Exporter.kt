@@ -19,6 +19,15 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.effect.OverlayEffect
+import androidx.media3.effect.FrameDropEffect
+import androidx.media3.effect.GaussianBlurWithFrameOverlaid
+import androidx.media3.effect.SpeedChangeEffect
+import androidx.media3.common.C
+import androidx.media3.common.audio.AudioProcessor
+import androidx.media3.common.audio.BaseAudioProcessor
+import androidx.media3.common.audio.SonicAudioProcessor
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import androidx.media3.effect.OverlaySettings
 import androidx.media3.effect.Presentation
 import androidx.media3.effect.TextOverlay
@@ -63,34 +72,46 @@ class Exporter(private val context: Context) {
         val texts = snap.tracks.filter { it.kind == TrackKind.TEXT }.flatMap { it.clips }
             .map { Timed(it.startMs.toLong(), (it.startMs + it.durationMs).toLong(), it.name) }
         val caps = snap.captions.map { Timed(it.startMs.toLong(), it.endMs.toLong(), it.text) }
-        val layout = if (snap.fill) Presentation.LAYOUT_SCALE_TO_FIT_WITH_CROP else Presentation.LAYOUT_SCALE_TO_FIT
         val totalMs = snap.summary.durationMs.toLong()
+        val blur = snap.blurBg && !snap.fill
 
         val items = video.map { c ->
             val isImage = MediaKind.isImage(context, c.source)
+            val speed = if (isImage) 1f else c.speed
             val mi = MediaItem.Builder().setUri(c.source).apply {
                 if (!isImage) setClippingConfiguration(MediaItem.ClippingConfiguration.Builder()
-                    .setStartPositionMs(c.inMs.toLong()).setEndPositionMs((c.inMs + c.durationMs).toLong()).build())
+                    .setStartPositionMs(c.inMs.toLong()).setEndPositionMs(c.inMs.toLong() + Mix.spanMs(c.durationMs.toLong(), speed)).build())
                 else setImageDurationMs(c.durationMs.toLong())
             }.build()
             val overlays = ImmutableList.of<androidx.media3.effect.TextureOverlay>(
                 TimedTextOverlay(c.startMs.toLong(), texts, spec.height, centered = true, style = CaptionStyle.Bold),
                 TimedTextOverlay(c.startMs.toLong(), caps, spec.height, centered = false, style = style),
             )
+            val video = mutableListOf<androidx.media3.common.Effect>()
+            if (speed != 1f) video += SpeedChangeEffect(speed)
+            if (!isImage) video += FrameDropEffect.createDefaultFrameDropEffect(spec.fps.toFloat())
+            if (blur && c.width > 0u && c.height > 0u) {
+                // Stretch to the canvas, blur it, and draw the sharp frame on top at its fitted size.
+                val (sx, sy) = Mix.fitScale(c.width.toInt(), c.height.toInt(), spec.width, spec.height)
+                video += Presentation.createForWidthAndHeight(spec.width, spec.height, Presentation.LAYOUT_STRETCH_TO_FIT)
+                video += GaussianBlurWithFrameOverlaid(spec.height / 40f, sx, sy)
+            } else {
+                video += Presentation.createForWidthAndHeight(spec.width, spec.height,
+                    if (snap.fill) Presentation.LAYOUT_SCALE_TO_FIT_WITH_CROP else Presentation.LAYOUT_SCALE_TO_FIT)
+            }
+            video += OverlayEffect(overlays)
             EditedMediaItem.Builder(mi)
                 .apply { if (isImage) { setDurationUs(c.durationMs.toLong() * 1000); setFrameRate(spec.fps) } }
-                .setEffects(Effects(ImmutableList.of(), ImmutableList.of<androidx.media3.common.Effect>(
-                    Presentation.createForWidthAndHeight(spec.width, spec.height, layout),
-                    OverlayEffect(overlays),
-                )))
+                .setEffects(Effects(audioChain(c, speed), video))
                 .build()
         }
         val seqs = mutableListOf(EditedMediaItemSequence(items))
         snap.tracks.firstOrNull { it.kind == TrackKind.AUDIO }?.clips?.firstOrNull()?.let { m ->
             val end = minOf(m.durationMs.toLong(), totalMs - m.startMs.toLong()).coerceAtLeast(1)
             val mi = MediaItem.Builder().setUri(m.source).setClippingConfiguration(
-                MediaItem.ClippingConfiguration.Builder().setStartPositionMs(m.inMs.toLong()).setEndPositionMs(m.inMs.toLong() + end).build()).build()
-            seqs += EditedMediaItemSequence(ImmutableList.of(EditedMediaItem.Builder(mi).setRemoveVideo(true).build()))
+                MediaItem.ClippingConfiguration.Builder().setStartPositionMs(m.inMs.toLong()).setEndPositionMs(m.inMs.toLong() + Mix.spanMs(end, m.speed)).build()).build()
+            seqs += EditedMediaItemSequence(ImmutableList.of(EditedMediaItem.Builder(mi).setRemoveVideo(true)
+                .setEffects(Effects(audioChain(m, m.speed), ImmutableList.of())).build()))
         }
         return Composition.Builder(seqs).build()
     }
@@ -145,6 +166,13 @@ class Exporter(private val context: Context) {
         } finally { file.delete() }
     }
 
+    /** Speed (pitch kept) then volume × fade envelope. */
+    private fun audioChain(c: uniffi.clio_ffi.Clip, speed: Float): List<AudioProcessor> = buildList {
+        if (speed != 1f) add(SonicAudioProcessor().apply { setSpeed(speed); setPitch(1f) })
+        if (c.muted || c.volume != 1f || c.fadeInMs > 0u || c.fadeOutMs > 0u)
+            add(GainProcessor(c.durationMs.toLong(), c.volume, c.fadeInMs.toLong(), c.fadeOutMs.toLong(), c.muted))
+    }
+
     private data class Timed(val startMs: Long, val endMs: Long, val text: String)
 
     /** Shows whichever cue is active at the current frame; times are relative to the clip's place on the timeline. */
@@ -175,6 +203,32 @@ class Exporter(private val context: Context) {
         override fun getOverlaySettings(presentationTimeUs: Long): OverlaySettings =
             OverlaySettings.Builder().setBackgroundFrameAnchor(0f, if (centered) 0f else -0.72f).build()
     }
+}
+
+/** 16-bit PCM gain with linear fades; times are in output (post-speed) clip time. */
+@OptIn(UnstableApi::class)
+private class GainProcessor(private val durMs: Long, private val volume: Float, private val fadeInMs: Long, private val fadeOutMs: Long, private val muted: Boolean) : BaseAudioProcessor() {
+    private var frames = 0L
+    override fun onConfigure(f: AudioProcessor.AudioFormat): AudioProcessor.AudioFormat {
+        if (f.encoding != C.ENCODING_PCM_16BIT) throw AudioProcessor.UnhandledAudioFormatException(f)
+        return f
+    }
+    override fun queueInput(input: ByteBuffer) {
+        val ch = inputAudioFormat.channelCount
+        val rate = inputAudioFormat.sampleRate
+        val n = input.remaining()
+        val out = replaceOutputBuffer(n)
+        val src = input.order(ByteOrder.nativeOrder())
+        while (src.remaining() >= 2 * ch) {
+            val g = Mix.gain(frames * 1000 / rate, durMs, volume, fadeInMs, fadeOutMs, muted)
+            repeat(ch) { out.putShort((src.short * g).toInt().coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort()) }
+            frames++
+        }
+        input.position(input.limit())
+        out.flip()
+    }
+    override fun onFlush() { frames = 0 }
+    override fun onReset() { frames = 0 }
 }
 
 object MediaKind {

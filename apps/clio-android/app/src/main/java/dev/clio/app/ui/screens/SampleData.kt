@@ -4,7 +4,10 @@ import androidx.compose.ui.graphics.Color
 
 data class Draft(val id: String, val title: String, val edited: String, val duration: String, val tint: Color, val thumbSource: String? = null, val thumbAtMs: Long = 0)
 data class Template(val title: String, val uses: String, val tint: Color)
-data class UiClip(val label: String, val startS: Float, val lenS: Float, val id: Long = label.hashCode().toLong(), val source: String? = null, val inS: Float = 0f)
+data class UiClip(
+    val label: String, val startS: Float, val lenS: Float, val id: Long = label.hashCode().toLong(), val source: String? = null, val inS: Float = 0f,
+    val sourceS: Float = 0f, val speed: Float = 1f, val volume: Float = 1f, val fadeInS: Float = 0f, val fadeOutS: Float = 0f, val muted: Boolean = false,
+)
 data class UiTrack(val name: String, val kind: String, val clips: List<UiClip>)
 
 object Samples {

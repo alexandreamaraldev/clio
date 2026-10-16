@@ -129,6 +129,7 @@ private fun EditorRoute(draftId: String, isNew: Boolean, initialTool: Int, onBac
                 androidx.media3.ui.PlayerView(c).apply {
                     useController = false
                     setShutterBackgroundColor(AColor.TRANSPARENT)
+                    setBackgroundColor(AColor.TRANSPARENT)
                     player = vm.player
                 }
             }, Modifier.fillMaxSize(), update = {
@@ -138,7 +139,7 @@ private fun EditorRoute(draftId: String, isNew: Boolean, initialTool: Int, onBac
         })
         AnimatedVisibility(vm.exportState != ExportState.Closed, enter = fadeIn(ClioMotion.fade()) + slideInVertically(ClioMotion.slide) { it / 3 },
             exit = fadeOut(ClioMotion.fade(160)) + slideOutVertically { it / 3 }) {
-            ExportSheet(vm.exportState, onStart = { vm.startExport(it) }, onClose = vm::closeExport, onShare = { uri ->
+            ExportSheet(vm.exportState, canvasW = vm.ui.canvasW, canvasH = vm.ui.canvasH, onStart = { vm.startExport(it) }, onClose = vm::closeExport, onShare = { uri ->
                 ctx.startActivity(android.content.Intent.createChooser(android.content.Intent(android.content.Intent.ACTION_SEND).apply {
                     type = "video/mp4"; putExtra(android.content.Intent.EXTRA_STREAM, uri); addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 }, null))

@@ -11,6 +11,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.viewModelScope
 import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import dev.clio.app.ClioApp
@@ -80,6 +81,7 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
                 ui = ui.copy(playing = isPlaying)
                 if (isPlaying) { syncMusic(); musicPlayer.play() } else musicPlayer.pause()
             }
+            override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) { applyItemParams() }
             override fun onPlaybackStateChanged(state: Int) { if (state == Player.STATE_ENDED) { pause(); seekTimeline(0f) } }
         })
     }
@@ -87,6 +89,7 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
     val musicPlayer: ExoPlayer = ExoPlayer.Builder(app).build()
     private var musicClip: uniffi.clio_ffi.Clip? = null
     private var clipStarts: LongArray = LongArray(0)
+    private var videoClips: List<uniffi.clio_ffi.Clip> = emptyList()
     private var saveJob: Job? = null
     private var captionJob: Job? = null
     private var lastJson: String? = null
@@ -124,53 +127,74 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
     private fun apply(s: Snapshot, rebuildPlayer: Boolean) {
         val uiTracks = s.tracks.filter { it.clips.isNotEmpty() || it.kind == TrackKind.VIDEO }.map { t ->
             UiTrack(t.name, when (t.kind) { TrackKind.VIDEO -> "video"; TrackKind.AUDIO -> "audio"; TrackKind.TEXT -> "text"; TrackKind.EFFECT -> "fx" },
-                t.clips.map { c -> UiClip(c.name, c.startMs.toFloat() / 1000f, c.durationMs.toFloat() / 1000f, c.id.toLong(), c.source, c.inMs.toFloat() / 1000f) })
+                t.clips.map { c -> UiClip(c.name, c.startMs.toFloat() / 1000f, c.durationMs.toFloat() / 1000f, c.id.toLong(), c.source, c.inMs.toFloat() / 1000f,
+                    c.sourceMs.toFloat() / 1000f, c.speed, c.volume, c.fadeInMs.toFloat() / 1000f, c.fadeOutMs.toFloat() / 1000f, c.muted) })
         }
         val caps = s.captions.map { Engine.Cap(it.startMs.toLong(), it.endMs.toLong(), it.text) }
         val withCaps = if (caps.isEmpty()) uiTracks else uiTracks + UiTrack("Legendas", "text",
             caps.mapIndexed { i, c -> UiClip("Aa  " + c.text, c.startMs / 1000f, (c.endMs - c.startMs).coerceAtLeast(1) / 1000f, -1L - i) })
         ui = ui.copy(title = s.summary.name, tracks = withCaps, durationS = s.summary.durationMs.toFloat() / 1000f, captions = caps,
             hasMedia = s.tracks.any { it.kind == TrackKind.VIDEO && it.clips.isNotEmpty() }, canUndo = s.canUndo, canRedo = s.canRedo,
-            loading = false, fill = s.fill,
+            loading = false, fill = s.fill, blurBg = s.blurBg, canvasW = s.summary.width.toInt(), canvasH = s.summary.height.toInt(),
             texts = s.tracks.filter { it.kind == TrackKind.TEXT }.flatMap { it.clips }.map { TextItem(it.id.toLong(), it.name, it.startMs.toLong(), (it.startMs + it.durationMs).toLong()) },
             music = s.tracks.firstOrNull { it.kind == TrackKind.AUDIO }?.clips?.firstOrNull()?.name)
         lastSnap = s
-        if (rebuildPlayer) rebuildPlaylist(s)
+        if (rebuildPlayer) rebuildPlaylist(s) else refreshClipCache(s)
     }
 
     private fun rebuildPlaylist(s: Snapshot) {
         val clips = s.tracks.firstOrNull { it.id == videoTrack }?.clips.orEmpty()
         clipStarts = LongArray(clips.size) { clips[it].startMs.toLong() }
+        videoClips = clips
         val app = getApplication<Application>()
         player.setMediaItems(clips.map { c ->
             MediaItem.Builder().setUri(c.source).setMediaId(c.id.toString()).apply {
                 if (MediaKind.isImage(app, c.source)) setImageDurationMs(c.durationMs.toLong())
                 else setClippingConfiguration(MediaItem.ClippingConfiguration.Builder()
-                    .setStartPositionMs(c.inMs.toLong()).setEndPositionMs((c.inMs + c.durationMs).toLong()).build())
+                    .setStartPositionMs(c.inMs.toLong()).setEndPositionMs(c.inMs.toLong() + Mix.spanMs(c.durationMs.toLong(), c.speed)).build())
             }.build()
         })
         player.prepare()
         musicClip = s.tracks.firstOrNull { it.kind == TrackKind.AUDIO }?.clips?.firstOrNull()
-        musicClip?.let { m -> musicPlayer.setMediaItem(MediaItem.fromUri(m.source)); musicPlayer.prepare() } ?: musicPlayer.clearMediaItems()
+        musicClip?.let { m ->
+            musicPlayer.setMediaItem(MediaItem.fromUri(m.source)); musicPlayer.prepare()
+            musicPlayer.playbackParameters = PlaybackParameters(m.speed)
+        } ?: musicPlayer.clearMediaItems()
+        applyItemParams()
         if (clips.isNotEmpty()) seekTimeline(playheadState.floatValue.coerceAtMost(ui.durationS))
     }
 
     /** Called by the UI once per frame while playing (withFrameNanos). */
     fun syncPlayhead() {
         val idx = player.currentMediaItemIndex
-        playheadState.floatValue = (clipStarts.getOrElse(idx) { 0L } + player.currentPosition) / 1000f
+        val c = videoClips.getOrNull(idx)
+        val local = (player.currentPosition / (c?.speed ?: 1f)).toLong()
+        playheadState.floatValue = (clipStarts.getOrElse(idx) { 0L } + local) / 1000f
+        if (c != null) player.volume = Mix.gain(local, c.durationMs.toLong(), c.volume, c.fadeInMs.toLong(), c.fadeOutMs.toLong(), c.muted).coerceAtMost(1f)
+        musicClip?.let { m ->
+            val t = (playheadState.floatValue * 1000).toLong() - m.startMs.toLong()
+            musicPlayer.volume = Mix.gain(t, m.durationMs.toLong(), m.volume, m.fadeInMs.toLong(), m.fadeOutMs.toLong(), m.muted).coerceAtMost(1f)
+        }
+    }
+
+    /** Per-clip speed/volume for whichever item ExoPlayer is on (it has one global setting). */
+    private fun applyItemParams() {
+        val c = videoClips.getOrNull(player.currentMediaItemIndex) ?: return
+        if (player.playbackParameters.speed != c.speed) player.playbackParameters = PlaybackParameters(c.speed)
+        player.volume = if (c.muted) 0f else c.volume.coerceAtMost(1f)
     }
 
     private fun syncMusic() {
         val m = musicClip ?: return
         val t = (playheadState.floatValue * 1000).toLong() - m.startMs.toLong()
-        if (t in 0 until m.durationMs.toLong()) musicPlayer.seekTo(m.inMs.toLong() + t) else musicPlayer.pause()
+        if (t in 0 until m.durationMs.toLong()) musicPlayer.seekTo(m.inMs.toLong() + Mix.spanMs(t, m.speed)) else musicPlayer.pause()
     }
 
     private fun seekTimeline(s: Float) {
         val ms = (s * 1000).toLong()
         val idx = clipStarts.indexOfLast { it <= ms }.coerceAtLeast(0)
-        if (clipStarts.isNotEmpty()) player.seekTo(idx, ms - clipStarts[idx])
+        if (clipStarts.isNotEmpty()) player.seekTo(idx, Mix.spanMs(ms - clipStarts[idx], videoClips.getOrNull(idx)?.speed ?: 1f))
+        applyItemParams()
         playheadState.floatValue = s
         syncMusic()
     }
@@ -195,7 +219,14 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
             media.probe(u)?.takeIf { it.durationMs > 0 }
         }
         if (infos.isEmpty()) return@launch
-        apply(edit { infos.forEach { appendClip(videoTrack, it.name, it.uri, it.durationMs.toULong()) } }, rebuildPlayer = true)
+        val app = getApplication<Application>()
+        apply(edit {
+            infos.forEach {
+                val id = appendClip(videoTrack, it.name, it.uri, it.durationMs.toULong())
+                val still = MediaKind.isImage(app, it.uri)
+                setClipSourceInfo(id, if (still) 0u else it.durationMs.toULong(), it.width.coerceAtLeast(0).toUInt(), it.height.coerceAtLeast(0).toUInt())
+            }
+        }, rebuildPlayer = true)
     }
 
     // --- EditorActions ---
@@ -218,8 +249,36 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
 
     override fun setCaptionStyle(style: CaptionStyle) { ui = ui.copy(captionStyle = style) }
 
-    // --- Fit / fill ---
-    override fun toggleFill() = launchEdit(rebuildPlayer = false) { setFill(!snapshot().fill) }.let { }
+    // --- Canvas: aspect ratio + framing ---
+    override fun toggleFill() = launchEdit(rebuildPlayer = false) {
+        val f = snapshot()
+        when { f.fill -> setFraming(false, false); f.blurBg -> setFraming(true, false); else -> setFraming(false, true) }
+    }.let { }
+    override fun setFraming(fill: Boolean, blur: Boolean) = launchEdit { setFraming(fill, blur) }.let { }
+    override fun setAspect(a: Aspect) { val (w, h) = a.canvas(); launchEdit { runCatching { setCanvas(w.toUInt(), h.toUInt()) } } }
+
+    // --- Clip edits (all undoable in the engine) ---
+    /** Explicit clip, or the main-track clip under the playhead. */
+    private fun ClioProject.target(clipId: Long?): ULong? {
+        val ms = (playheadState.floatValue * 1000).toULong()
+        return clipId?.takeIf { it >= 0 }?.toULong()
+            ?: tracks().firstOrNull { it.id == videoTrack }?.clips?.firstOrNull { ms >= it.startMs && ms < it.startMs + it.durationMs }?.id
+    }
+    override fun trim(clipId: Long, inS: Float, lenS: Float) = launchEdit(rebuildPlayer = true) {
+        runCatching { trimClip(clipId.toULong(), (inS * 1000).toLong().coerceAtLeast(0).toULong(), (lenS * 1000).toLong().coerceAtLeast(1).toULong()) }
+    }.let { }
+    override fun move(clipId: Long, toIndex: Int) = launchEdit(rebuildPlayer = true) { runCatching { moveClip(clipId.toULong(), toIndex.coerceAtLeast(0).toUInt()) } }.let { }
+    override fun duplicate(clipId: Long?) = launchEdit(rebuildPlayer = true) { target(clipId)?.let { runCatching { duplicateClip(it) } } }.let { }
+    override fun setSpeed(clipId: Long?, speed: Float) = launchEdit(rebuildPlayer = true) { target(clipId)?.let { runCatching { setClipSpeed(it, speed) } } }.let { }
+    override fun setAudio(clipId: Long?, volume: Float, fadeInS: Float, fadeOutS: Float, muted: Boolean) = launchEdit(rebuildPlayer = false) {
+        target(clipId)?.let { runCatching { setClipAudio(it, volume, (fadeInS * 1000).toLong().toULong(), (fadeOutS * 1000).toLong().toULong(), muted) } }
+    }.let { }
+
+    private fun refreshClipCache(s: Snapshot) {
+        videoClips = s.tracks.firstOrNull { it.id == videoTrack }?.clips.orEmpty()
+        musicClip = s.tracks.firstOrNull { it.kind == TrackKind.AUDIO }?.clips?.firstOrNull()
+        applyItemParams()
+    }
 
     // --- Text overlays ---
     private suspend fun textTrack(): ULong = withContext(engine) {
@@ -268,7 +327,7 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
         if (clipId < 0) {
             val i = (-1L - clipId).toInt()
             launchEdit { setCaptions(captions().filterIndexed { j, _ -> j != i }) }
-        } else launchEdit(rebuildPlayer = true) { removeClip(clipId.toULong()) }
+        } else launchEdit(rebuildPlayer = true) { target(clipId)?.let { removeClip(it) } }
     }
     override fun editCaptions(caps: List<Engine.Cap>) {
         launchEdit { setCaptions(caps.map { Caption(it.startMs.toULong(), it.endMs.toULong(), it.text) }) }

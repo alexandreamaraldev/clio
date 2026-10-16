@@ -21,6 +21,7 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
@@ -38,6 +39,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
 import dev.clio.app.R
 import dev.clio.app.engine.Engine
+import dev.clio.app.engine.Mix
 import dev.clio.app.ui.LocalThumbnails
 import dev.clio.app.ui.components.*
 import dev.clio.app.ui.theme.ClioColors
@@ -54,13 +56,20 @@ private data class Tool(val icon: ImageVector, val label: String, val ready: Boo
 private val tools = listOf(
     Tool(Icons.Outlined.ContentCut, "Dividir"), Tool(Icons.Outlined.TextFields, "Texto"),
     Tool(Icons.Outlined.MusicNote, "Música"), Tool(Icons.Outlined.ClosedCaption, "Legendas"),
+    Tool(Icons.Outlined.Speed, "Velocidade"), Tool(Icons.Outlined.VolumeUp, "Volume"),
+    Tool(Icons.Outlined.AspectRatio, "Formato"), Tool(Icons.Outlined.ContentCopy, "Duplicar"),
     Tool(Icons.Outlined.Tune, "Ajustes", ready = false), Tool(Icons.Outlined.FilterVintage, "Filtros", ready = false),
-    Tool(Icons.Outlined.AutoAwesome, "Efeitos", ready = false), Tool(Icons.Outlined.Speed, "Velocidade", ready = false),
+    Tool(Icons.Outlined.AutoAwesome, "Efeitos", ready = false),
 )
 const val TOOL_SPLIT = 0
 const val TOOL_TEXT = 1
 const val TOOL_MUSIC = 2
 const val TOOL_CAPTIONS = 3
+const val TOOL_SPEED = 4
+const val TOOL_VOLUME = 5
+const val TOOL_FORMAT = 6
+const val TOOL_DUPLICATE = 7
+private val panelTools = setOf(TOOL_TEXT, TOOL_MUSIC, TOOL_CAPTIONS, TOOL_SPEED, TOOL_VOLUME, TOOL_FORMAT)
 
 @Immutable
 data class TextItem(val id: Long, val text: String, val startMs: Long, val endMs: Long)
@@ -82,6 +91,9 @@ data class EditorUi(
     val canRedo: Boolean = false,
     val loading: Boolean = false,
     val fill: Boolean = false,
+    val blurBg: Boolean = false,
+    val canvasW: Int = 1080,
+    val canvasH: Int = 1920,
     val texts: List<TextItem> = emptyList(),
     val music: String? = null,
     val captionStyle: CaptionStyle = CaptionStyle.Clean,
@@ -105,6 +117,13 @@ interface EditorActions {
     fun pickMusic() {}
     fun removeMusic() {}
     fun editCaptions(caps: List<Engine.Cap>) {}
+    fun trim(clipId: Long, inS: Float, lenS: Float) {}
+    fun move(clipId: Long, toIndex: Int) {}
+    fun duplicate(clipId: Long?) {}
+    fun setSpeed(clipId: Long?, speed: Float) {}
+    fun setAudio(clipId: Long?, volume: Float, fadeInS: Float, fadeOutS: Float, muted: Boolean) {}
+    fun setAspect(a: dev.clio.app.engine.Aspect) {}
+    fun setFraming(fill: Boolean, blur: Boolean) {}
 }
 
 object NoActions : EditorActions
@@ -143,13 +162,15 @@ fun EditorScreen(
         Box(Modifier.weight(1f).fillMaxWidth().padding(horizontal = Space.xl, vertical = Space.sm), contentAlignment = Alignment.Center) {
             val pulse by animateFloatAsState(if (ui.playing) 1f else 0.995f, ClioMotion.gentle(), label = "pv")
             Box(
-                Modifier.fillMaxHeight().aspectRatio(9f / 16f).graphicsLayer { scaleX = pulse; scaleY = pulse }
+                Modifier.aspectRatio(ui.canvasW.toFloat() / ui.canvasH.coerceAtLeast(1), matchHeightConstraintsFirst = ui.canvasH >= ui.canvasW)
+                    .animateContentSize(ClioMotion.gentle()).graphicsLayer { scaleX = pulse; scaleY = pulse }
                     .clip(ClioShapes.lg).background(ClioColors.PreviewBottom)
                     .border(1.dp, ClioColors.Hairline, ClioShapes.lg),
             ) {
+                if (ui.blurBg && !ui.fill) BlurBackdrop(ui.tracks.firstOrNull { it.kind == "video" }?.clips.orEmpty(), playhead)
                 preview(ui.fill)
                 TextLayer(ui.texts, playhead, Modifier.align(Alignment.Center).padding(Space.md))
-                if (ui.hasMedia) Text(if (ui.fill) "Preencher" else "Ajustar", style = MaterialTheme.typography.labelSmall, color = ClioColors.OnMedia,
+                if (ui.hasMedia) Text(when { ui.fill -> "Preencher"; ui.blurBg -> "Desfoque"; else -> "Ajustar" }, style = MaterialTheme.typography.labelSmall, color = ClioColors.OnMedia,
                     modifier = Modifier.align(Alignment.TopEnd).padding(10.dp).pressable(onClick = actions::toggleFill)
                         .clip(ClioShapes.pill).background(ClioColors.MediaScrim).padding(horizontal = 10.dp, vertical = 5.dp))
                 if (!ui.hasMedia && !ui.loading) Column(Modifier.align(Alignment.Center).pressable(onClick = actions::addClip), horizontalAlignment = Alignment.CenterHorizontally) {
@@ -184,14 +205,21 @@ fun EditorScreen(
             }
         }
 
-        AnimatedContent(selectedTool.takeIf { it in setOf(TOOL_TEXT, TOOL_MUSIC, TOOL_CAPTIONS) } ?: -1, transitionSpec = {
+        // Clip tools act on the selected clip, or the main-track clip under the playhead.
+        val target = ui.tracks.flatMap { it.clips }.firstOrNull { it.id == selectedClip }
+            ?: ui.tracks.firstOrNull { it.kind == "video" }?.clips?.firstOrNull { val t = playhead(); t >= it.startS && t < it.startS + it.lenS }
+        AnimatedContent(selectedTool.takeIf { it in panelTools } ?: -1, transitionSpec = {
             (fadeIn(ClioMotion.fade()) + slideInVertically(ClioMotion.slide) { it / 8 }) togetherWith fadeOut(ClioMotion.fade(140))
         }, label = "panel") { panel ->
             when (panel) {
                 TOOL_CAPTIONS -> CaptionsPanel(ui.captions, capStyle, ui.captionStatus, actions::setCaptionStyle, actions::generateCaptions, actions::editCaptions)
                 TOOL_TEXT -> TextPanel(ui.texts, actions::addText, actions::editText)
                 TOOL_MUSIC -> MusicPanel(ui.music, actions::pickMusic, actions::removeMusic)
-                else -> Timeline(ui.tracks, ui.durationS, playhead, ui.playing, selectedClip, { selectedClip = it }, actions::scrub, actions::addClip)
+                TOOL_SPEED -> SpeedPanel(target) { actions.setSpeed(target?.id, it) }
+                TOOL_VOLUME -> VolumePanel(target) { v, fi, fo, m -> actions.setAudio(target?.id, v, fi, fo, m) }
+                TOOL_FORMAT -> FormatPanel(ui.canvasW, ui.canvasH, ui.fill, ui.blurBg, actions::setAspect, actions::setFraming)
+                else -> Timeline(ui.tracks, ui.durationS, playhead, ui.playing, selectedClip, { selectedClip = it }, actions::scrub, actions::addClip,
+                    onTrim = actions::trim, onMove = actions::move)
             }
         }
 
@@ -203,7 +231,11 @@ fun EditorScreen(
                     val t = tools[i]
                     Box {
                         ToolButton(t.icon, t.label, selected = selectedTool == i, enabled = t.ready) {
-                            if (i == TOOL_SPLIT) actions.split(selectedClip) else selectedTool = if (selectedTool == i) -1 else i
+                            when (i) {
+                                TOOL_SPLIT -> actions.split(selectedClip)
+                                TOOL_DUPLICATE -> actions.duplicate(selectedClip)
+                                else -> selectedTool = if (selectedTool == i) -1 else i
+                            }
                         }
                         if (!t.ready) Text("em breve", style = MaterialTheme.typography.labelSmall.copy(fontSize = androidx.compose.ui.unit.TextUnit(8f, androidx.compose.ui.unit.TextUnitType.Sp)),
                             color = ClioColors.TextTertiary, modifier = Modifier.align(Alignment.TopCenter))
@@ -266,6 +298,8 @@ fun Timeline(
     onSelect: (Long?) -> Unit,
     onScrub: (Float) -> Unit,
     onAdd: () -> Unit = {},
+    onTrim: (id: Long, inS: Float, lenS: Float) -> Unit = { _, _, _ -> },
+    onMove: (id: Long, toIndex: Int) -> Unit = { _, _ -> },
 ) {
     val haptics = rememberHaptics()
     val density = LocalDensity.current
@@ -306,6 +340,8 @@ fun Timeline(
                         val ev = awaitPointerEvent()
                         val pressed = ev.changes.filter { it.pressed }
                         if (pressed.isEmpty()) break
+                        // A trim handle or a reorder drag owns this gesture.
+                        if (ev.changes.any { it.isConsumed }) { pinched = true; continue }
                         if (pressed.size >= 2) {
                             pinched = true
                             val z = ev.calculateZoom()
@@ -344,7 +380,15 @@ fun Timeline(
             Spacer(Modifier.height(6.dp))
             tracks.forEach { t ->
                 Box(Modifier.fillMaxWidth().height(if (t.kind == "video") 56.dp else 36.dp).padding(vertical = 3.dp)) {
-                    t.clips.forEach { c -> key(c.id) { ClipView(t.kind, c, selected == c.id, offset, pps) { onSelect(if (selected == c.id) null else c.id) } } }
+                    val editable = t.kind == "video" || t.kind == "audio"
+                    t.clips.forEachIndexed { i, c ->
+                        key(c.id) {
+                            ClipView(t.kind, c, selected == c.id, offset, pps,
+                                onTrim = if (editable) { l, d -> trimClip(c, l, d, onTrim, haptics) } else null,
+                                onMove = if (t.kind == "video" && t.clips.size > 1) { dxS -> onMove(c.id, reorderIndex(t.clips, i, dxS)); haptics.confirm() } else null,
+                            ) { onSelect(if (selected == c.id) null else c.id) }
+                        }
+                    }
                     if (t.kind == "video" && t.clips.isEmpty()) {
                         Row(
                             Modifier.wrapContentWidth(Alignment.Start, unbounded = true)
@@ -368,23 +412,59 @@ fun Timeline(
     }
 }
 
+private fun trimClip(c: UiClip, left: Boolean, deltaS: Float, onTrim: (Long, Float, Float) -> Unit, haptics: Haptics) {
+    val (inS, lenS) = Mix.trim(c.inS, c.lenS, c.speed, c.sourceS, left, Mix.snap(deltaS))
+    if (inS != c.inS || lenS != c.lenS) { onTrim(c.id, inS, lenS); haptics.tick() }
+}
+
+/** Where a clip dragged by [dxS] seconds lands: the slot whose midpoint its centre passes. */
+internal fun reorderIndex(clips: List<UiClip>, from: Int, dxS: Float): Int {
+    val c = clips[from]
+    val centre = c.startS + c.lenS / 2 + dxS
+    val others = clips.filterIndexed { j, _ -> j != from }
+    return others.count { it.startS + it.lenS / 2 < centre }
+}
+
+/**
+ * One clip. Tap selects (it lifts on a spring). When selected, video/audio clips show trim handles
+ * (drag either edge, snapped to frames, committed on release). Long-press then drag reorders
+ * clips on the main track.
+ */
 @Composable
-private fun ClipView(kind: String, c: UiClip, isSel: Boolean, offset: () -> Float, pps: () -> Float, onClick: () -> Unit) {
-    val lift by animateFloatAsState(if (isSel) 1f else 0f, ClioMotion.snappy(), label = "sel")
+private fun ClipView(
+    kind: String, c: UiClip, isSel: Boolean, offset: () -> Float, pps: () -> Float,
+    onTrim: ((left: Boolean, deltaS: Float) -> Unit)? = null,
+    onMove: ((dxS: Float) -> Unit)? = null,
+    onClick: () -> Unit,
+) {
+    var dragX by remember { mutableFloatStateOf(0f) }
+    var dragging by remember { mutableStateOf(false) }
+    var trimL by remember { mutableFloatStateOf(0f) }
+    var trimR by remember { mutableFloatStateOf(0f) }
+    val lift by animateFloatAsState(if (isSel || dragging) 1f else 0f, ClioMotion.snappy(), label = "sel")
     val tint = when (kind) { "video" -> ClioColors.SurfaceHigh; "audio" -> ClioColors.TrackAudio; "text" -> ClioColors.ClaySoft; else -> ClioColors.SurfaceRaised }
     val gap = with(LocalDensity.current) { 2.dp.toPx() }
+    val haptics = rememberHaptics()
+    val curMove by rememberUpdatedState(onMove)
     Box(
         Modifier
             // Position and width come from the playhead/zoom in the layout phase only.
             .wrapContentWidth(Alignment.Start, unbounded = true)
-            .offset { androidx.compose.ui.unit.IntOffset((offset() + c.startS * pps()).roundToInt(), 0) }
+            .offset { androidx.compose.ui.unit.IntOffset((offset() + c.startS * pps() + trimL + dragX).roundToInt(), 0) }
             .layout { m, cs ->
-                val w = (c.lenS * pps() - gap).roundToInt().coerceAtLeast(1)
+                val w = (c.lenS * pps() - gap - trimL + trimR).roundToInt().coerceAtLeast(1)
                 val pl = m.measure(Constraints.fixed(w, cs.maxHeight))
                 layout(w, cs.maxHeight) { pl.place(0, 0) }
             }
-            .zIndex(if (isSel) 1f else 0f)
-            .graphicsLayer { scaleY = 1f + 0.06f * lift; translationY = -3f * lift }
+            .zIndex(if (isSel || dragging) 1f else 0f)
+            .graphicsLayer { scaleY = 1f + 0.06f * lift; translationY = -3f * lift; alpha = if (dragging) 0.92f else 1f }
+            .then(if (onMove == null) Modifier else Modifier.pointerInput(c.id) {
+                detectDragGesturesAfterLongPress(
+                    onDragStart = { dragging = true; haptics.click() },
+                    onDragEnd = { val d = dragX / pps(); dragging = false; dragX = 0f; curMove?.invoke(d) },
+                    onDragCancel = { dragging = false; dragX = 0f },
+                ) { ch, amount -> ch.consume(); dragX += amount.x }
+            })
             .pressable(onClick = onClick)
             .clip(ClioShapes.sm)
             .background(tint)
@@ -393,11 +473,52 @@ private fun ClipView(kind: String, c: UiClip, isSel: Boolean, offset: () -> Floa
     ) {
         if (kind == "audio") Waveform(Modifier.fillMaxSize().padding(vertical = 6.dp))
         if (kind == "video" && c.source != null) Filmstrip(c, Modifier.matchParentSize())
-        Text(c.label, style = MaterialTheme.typography.labelSmall, color = ClioColors.TextPrimary, maxLines = 1,
-            modifier = Modifier.padding(horizontal = 8.dp).then(
+        Text(c.label + if (c.speed != 1f) "  ${fmtSpeed(c.speed)}" else "", style = MaterialTheme.typography.labelSmall, color = ClioColors.TextPrimary, maxLines = 1,
+            modifier = Modifier.padding(horizontal = 16.dp).then(
                 if (kind == "video" && c.source != null) Modifier.clip(ClioShapes.pill).background(ClioColors.MediaScrim).padding(horizontal = 6.dp, vertical = 2.dp) else Modifier))
+        if (c.muted) Icon(Icons.Outlined.VolumeOff, null, tint = ClioColors.OnMedia, modifier = Modifier.align(Alignment.TopEnd).padding(4.dp).size(12.dp))
+        if (isSel && onTrim != null) {
+            val cur by rememberUpdatedState(onTrim)
+            TrimHandle(Modifier.align(Alignment.CenterStart), onDrag = { trimL = (trimL + it).coerceAtMost(c.lenS * pps() - 24f) }) {
+                val d = trimL / pps(); trimL = 0f; cur(true, d)
+            }
+            TrimHandle(Modifier.align(Alignment.CenterEnd), onDrag = { trimR = (trimR + it).coerceAtLeast(-(c.lenS * pps() - 24f)) }) {
+                val d = trimR / pps(); trimR = 0f; cur(false, d)
+            }
+        }
     }
 }
+
+@Composable
+private fun TrimHandle(modifier: Modifier, onDrag: (Float) -> Unit, onEnd: () -> Unit) {
+    var active by remember { mutableStateOf(false) }
+    val w by animateDpAsState(if (active) 16.dp else 12.dp, ClioMotion.snappy(), label = "h")
+    Box(
+        modifier.fillMaxHeight().width(w).background(ClioColors.Clay)
+            .pointerInput(Unit) {
+                detectHorizontalDragGestures(
+                    onDragStart = { active = true },
+                    onDragEnd = { active = false; onEnd() },
+                    onDragCancel = { active = false; onEnd() },
+                ) { ch, dx -> ch.consume(); onDrag(dx) }
+            },
+        contentAlignment = Alignment.Center,
+    ) { Box(Modifier.width(2.dp).height(14.dp).clip(ClioShapes.pill).background(ClioColors.OnMedia)) }
+}
+
+/** Blurred, enlarged frame of the current clip behind a fitted preview (API 31+ blur; dimmed fallback). */
+@Composable
+private fun BlurBackdrop(clips: List<UiClip>, playhead: () -> Float) {
+    val thumbs = LocalThumbnails.current ?: return
+    val clip by remember(clips) { derivedStateOf { val t = playhead(); clips.firstOrNull { t >= it.startS && t < it.startS + it.lenS } ?: clips.firstOrNull() } }
+    val c = clip ?: return
+    val img by produceState<ImageBitmap?>(null, c.source, c.inS) { value = c.source?.let { thumbs(it, (c.inS * 1000).toLong() + 200) } }
+    Crossfade(img, animationSpec = ClioMotion.fade(), label = "blur") { b ->
+        if (b != null) Image(b, null, Modifier.fillMaxSize().blur(28.dp).graphicsLayer { alpha = 0.85f }, contentScale = ContentScale.Crop)
+    }
+}
+
+internal fun fmtSpeed(s: Float): String = if (s >= 1f && s % 1f == 0f) "${s.toInt()}x" else "%.1fx".format(s).replace('.', ',')
 
 /** Real thumbnails along a video clip at a fixed tile count; loaded lazily and cached. */
 @Composable

@@ -29,6 +29,9 @@ class ScreensTest {
     @Test fun editorCaptions() = shot(ThemeMode.Dark) { EditorScreen(ui(caps), { 3.0f }, initialTool = TOOL_CAPTIONS) }
     @Test fun editorCaptionsDownloading() = shot(ThemeMode.Dark) { EditorScreen(ui(st = CaptionStatus.Downloading(0.38f, 290)), { 2.4f }, initialTool = TOOL_CAPTIONS) }
     @Test fun editorText() = shot(ThemeMode.Dark) { EditorScreen(ui().copy(texts = listOf(TextItem(1, "Lisboa", 2000, 5000), TextItem(2, "Fim", 9000, 11000))), { 2.4f }, initialTool = TOOL_TEXT) }
+    @Test fun editorSpeed() = shot(ThemeMode.Dark) { EditorScreen(ui(), { 2.4f }, initialTool = TOOL_SPEED) }
+    @Test fun editorVolume() = shot(ThemeMode.Light) { EditorScreen(ui(), { 2.4f }, initialTool = TOOL_VOLUME) }
+    @Test fun editorFormat() = shot(ThemeMode.Dark) { EditorScreen(ui().copy(canvasW = 1080, canvasH = 1080, blurBg = true), { 2.4f }, initialTool = TOOL_FORMAT) }
     @Test fun editorMusic() = shot(ThemeMode.Light) { EditorScreen(ui().copy(music = "Lo-fi morning"), { 2.4f }, initialTool = TOOL_MUSIC) }
     @Test fun exportChoose() = shot(ThemeMode.Dark) { ExportSheet(dev.clio.app.engine.ExportState.Choosing, {}, {}, {}) }
     @Test fun exportDone() = shot(ThemeMode.Light) { ExportSheet(dev.clio.app.engine.ExportState.Done(android.net.Uri.EMPTY), {}, {}, {}) }
