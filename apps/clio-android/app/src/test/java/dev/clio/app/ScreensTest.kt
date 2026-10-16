@@ -41,4 +41,17 @@ class ScreensTest {
     @Test fun exportChoose() = shot(ThemeMode.Dark) { ExportSheet(dev.clio.app.engine.ExportState.Choosing, {}, {}, {}) }
     @Test fun exportDone() = shot(ThemeMode.Light) { ExportSheet(dev.clio.app.engine.ExportState.Done(android.net.Uri.EMPTY), {}, {}, {}) }
     @Test fun exportProgress() = shot(ThemeMode.Dark) { ExportSheet(dev.clio.app.engine.ExportState.Running(0.62f, "Stories / Reels / TikTok"), {}, {}, {}) }
+    private fun w(s: Long, e: Long, t: String) = uniffi.clio_ffi.CaptionWord(s.toULong(), e.toULong(), t)
+    private val ptCaps = listOf(Engine.Cap(2000, 4600, "Atenção: você não vai acreditar!",
+        listOf(w(2000, 2600, "Atenção:"), w(2600, 3000, "você"), w(3000, 3400, "não"), w(3400, 3700, "vai"), w(3700, 4600, "acreditar!"))))
+    // Playhead on "não" (3.1 s). Note: Paparazzi has no native engine, so the overlay uses the
+    // StyledText fallback (plain line); these shots cover the preset picker + panel per preset.
+    private fun preset(mode: ThemeMode, s: CaptionStyle) = shot(mode) { EditorScreen(ui(ptCaps).copy(captionStyle = s), { 3.1f }, initialTool = TOOL_CAPTIONS) }
+    @Test fun captionPresetClean() = preset(ThemeMode.Dark, CaptionStyle.Clean)
+    @Test fun captionPresetBold() = preset(ThemeMode.Dark, CaptionStyle.Bold)
+    @Test fun captionPresetBox() = preset(ThemeMode.Light, CaptionStyle.Box)
+    @Test fun captionPresetKaraoke() = preset(ThemeMode.Dark, CaptionStyle.Karaoke)
+    @Test fun captionPresetPop() = preset(ThemeMode.Dark, CaptionStyle.Pop)
+    @Test fun captionPresetBounce() = preset(ThemeMode.Dark, CaptionStyle.Bounce)
+    @Test fun captionPresetHighlight() = preset(ThemeMode.Light, CaptionStyle.Highlight)
 }
