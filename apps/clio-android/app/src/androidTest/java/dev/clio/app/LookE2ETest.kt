@@ -74,7 +74,7 @@ class LookE2ETest {
 
     /** The filter strip is a LazyRow: scroll it to the thumbnail, then tap it. */
     private fun pick(label: String) {
-        compose.onNode(hasScrollToNodeAction() and hasAnyDescendant(hasContentDescription("Filtro ", substring = true)), useUnmergedTree = true)
+        compose.onNodeWithTag("filter-strip", useUnmergedTree = true)
             .performScrollToNode(hasContentDescription("Filtro $label"))
         compose.onNodeWithContentDescription("Filtro $label").performClick()
         compose.waitForIdle()

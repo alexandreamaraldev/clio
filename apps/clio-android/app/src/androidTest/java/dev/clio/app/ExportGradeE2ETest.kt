@@ -11,6 +11,7 @@ import dev.clio.app.engine.Grades
 import dev.clio.app.ui.screens.CaptionStyle
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -75,6 +76,8 @@ class ExportGradeE2ETest {
 
     // --- every preset and every slider against the CPU reference (Grades.grade) ---
 
+    private val NEUTRAL_TOL = 3
+
     /** Swatch bands of the synthetic still: grey, red, skin, blue (top to bottom). */
     private val swatches = intArrayOf(0x808080, 0xC8503C, 0xDCAA8C, 0x325AB4)
 
@@ -100,6 +103,11 @@ class ExportGradeE2ETest {
         return IntArray(3) { (c[it] * 255f + 0.5f).toInt() }
     }
 
+    /**
+     * KNOWN BUG (PR #5, colour range): an ungraded still exports darker (grey 128 -> 115, blue
+     * 50,90,180 -> 33,73,173), i.e. a full/limited range mismatch in the export path. This test is
+     * strict on purpose and fails until the root cause is fixed; do not loosen it.
+     */
     @Test fun everyPresetAndSliderMatchesReference() {
         val n = Grades.NEUTRAL
         val cases = listOf("neutral" to n) +
@@ -119,26 +127,70 @@ class ExportGradeE2ETest {
         cases.forEach { (name, g) -> val id = p.appendClip(v, name, still, 1000u); p.setClipSourceInfo(id, 0u, 720u, 1280u); p.setClipGrade(id, g) }
         val uri = runBlocking { withTimeout(240_000) { Exporter(ctx).export(p.snapshot(), ExportSpec("grade-ref", 720, 1280, 30), CaptionStyle.Clean) {} } }
 
-        val lib = Grades.Library(ctx); val tol = 12
+        val lib = Grades.Library(ctx); val tol = 6
         val m = MediaMetadataRetriever(); m.setDataSource(ctx, uri)
         val fails = mutableListOf<String>()
-        val n0 = m.getFrameAtTime(500_000, MediaMetadataRetriever.OPTION_CLOSEST)!!.copy(Bitmap.Config.ARGB_8888, false)
-        val offset = swatches.indices.map { i -> val p0 = patch(n0, i); val r = swatches[i]; intArrayOf(p0[0] - ((r shr 16) and 255), p0[1] - ((r shr 8) and 255), p0[2] - (r and 255)) }
-        android.util.Log.i("ClioQA", "CLIO-QA grade-ref pipeline offset (neutral): " + offset.joinToString(" ") { it.joinToString(",") })
         try {
             cases.forEachIndexed { k, (name, g) ->
                 val f = m.getFrameAtTime((k * 1000L + 500) * 1000, MediaMetadataRetriever.OPTION_CLOSEST)!!.copy(Bitmap.Config.ARGB_8888, false)
                 swatches.forEachIndexed { i, rgb ->
-                    // The still->H.264->decode path alone shifts colours (measured on the neutral clip);
-                    // compare the grade's effect on top of that offset.
-                    val got = patch(f, i); val want = reference(rgb, g, lib).let { r -> IntArray(3) { r[it] + offset[i][it] } }
+                    val got = patch(f, i); val want = reference(rgb, g, lib)
                     val err = (0..2).maxOf { kotlin.math.abs(got[it] - want[it]) }
                     val line = "CLIO-QA grade-ref $name swatch$i: got ${got.joinToString(",")} want ${want.joinToString(",")} err $err"
                     android.util.Log.i("ClioQA", line)
-                    if (err > tol) fails += line
+                    // Ungraded output must match its input closely; graded output must match the reference.
+                    if (err > (if (name == "neutral") NEUTRAL_TOL else tol)) fails += line
                 }
             }
         } finally { m.release() }
         assertTrue("${fails.size} patches off by > $tol:\n" + fails.joinToString("\n"), fails.isEmpty())
+    }
+
+    // --- HDR (HLG) sources: CI pushes /data/local/tmp/clio-hlg.mp4 (HEVC Main10, BT.2020, arib-std-b67) ---
+
+    private fun hlg(): String {
+        val dst = File(ctx.cacheDir, "hlg.mp4")
+        android.os.ParcelFileDescriptor.AutoCloseInputStream(inst.uiAutomation.executeShellCommand("cat /data/local/tmp/clio-hlg.mp4"))
+            .use { i -> dst.outputStream().use { i.copyTo(it) } }
+        assertTrue("HLG fixture missing: qa/run-device-qa.sh pushes /data/local/tmp/clio-hlg.mp4", dst.length() > 10_000)
+        return Uri.fromFile(dst).toString()
+    }
+
+    /** Valid MP4: duration, 720x1280 (rotation-aware), and a video frame that decodes. */
+    private fun assertValid(uri: Uri, expectedMs: Long, label: String) {
+        val m = MediaMetadataRetriever()
+        try {
+            m.setDataSource(ctx, uri)
+            val d = m.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)!!.toLong()
+            val vw = m.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)!!.toInt()
+            val vh = m.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)!!.toInt()
+            val rot = m.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)?.toIntOrNull() ?: 0
+            val size = if (rot % 180 != 0) vh to vw else vw to vh
+            val frames = listOf(200L, expectedMs / 2, expectedMs - 300).map { m.getFrameAtTime(it * 1000, MediaMetadataRetriever.OPTION_CLOSEST) }
+            val line = "CLIO-QA grade-hdr $label: ${size.first}x${size.second} ${d}ms frames=${frames.map { it != null }}"
+            android.util.Log.i("ClioQA", line)
+            assertEquals("$label size", 720 to 1280, size)
+            assertTrue("$label duration $d vs $expectedMs", kotlin.math.abs(d - expectedMs) <= 350)
+            assertTrue("$label video frames not decodable: $line", frames.all { it != null && it.width > 0 })
+        } finally { m.release() }
+    }
+
+    @Test fun hdrSourcesExportWithGrades() {
+        val hdr = hlg(); val sdr = video()
+        // 1) One graded HLG clip.
+        val p1 = ClioProject("hdr-graded", 1080u, 1920u)
+        val v1 = p1.addTrack(TrackKind.VIDEO, "V")
+        val h = p1.appendClip(v1, "hlg", hdr, 3000u); p1.setClipSourceInfo(h, 3000u, 1280u, 720u)
+        p1.setClipGrade(h, Grades.NEUTRAL.copy(filter = "cinema", brightness = 0.2f))
+        val u1 = runBlocking { withTimeout(240_000) { Exporter(ctx).export(p1.snapshot(), ExportSpec("hdr-graded", 720, 1280, 30), CaptionStyle.Clean) {} } }
+        assertValid(u1, 3000, "graded-hlg")
+        // 2) Graded SDR clip followed by an ungraded HLG clip on the same timeline.
+        val p2 = ClioProject("hdr-mixed", 1080u, 1920u)
+        val v2 = p2.addTrack(TrackKind.VIDEO, "V")
+        val s = p2.appendClip(v2, "sdr", sdr, 3000u); p2.setClipSourceInfo(s, 6000u, 1280u, 720u)
+        val h2 = p2.appendClip(v2, "hlg", hdr, 3000u); p2.setClipSourceInfo(h2, 3000u, 1280u, 720u)
+        p2.setClipGrade(s, Grades.NEUTRAL.copy(filter = "pb"))
+        val u2 = runBlocking { withTimeout(240_000) { Exporter(ctx).export(p2.snapshot(), ExportSpec("hdr-mixed", 720, 1280, 30), CaptionStyle.Clean) {} } }
+        assertValid(u2, 6000, "graded-sdr+hlg")
     }
 }

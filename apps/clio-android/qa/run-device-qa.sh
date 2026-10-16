@@ -6,7 +6,7 @@ set -uo pipefail
 APP=$1; TEST=$2; VIDEO=$3; OUT=$4
 PKG=dev.clio.app
 RUNNER=$PKG.test/androidx.test.runner.AndroidJUnitRunner
-TESTS=(EditorE2ETest#fullEditAndExport EditorE2ETest#splitSurvivesRecreateAndReopen ExportMatrixTest#matrix TextCaptionsExportE2ETest#styledTextAndHighlightCaptionsArePainted TextCaptionsExportE2ETest#videoWithAnimatedTextAndKaraokeKeepsStreams ExportLayersBenchTest#bench ExportLayersBenchTest#portraitLayer LayersE2ETest#layerTransformTransitionExport ExportFpsTest#requestedFrameRateIsHonoured AudioMixE2ETest#overlappingLanesExport AudioMixRmsE2ETest#overlappingLanesSoundOnlyInTheirWindows ExportGradeE2ETest#filterAndAdjustmentsArePainted ExportGradeE2ETest#everyPresetAndSliderMatchesReference LookE2ETest#presetsSlidersUndoRedoAndDraft)
+TESTS=(EditorE2ETest#fullEditAndExport EditorE2ETest#splitSurvivesRecreateAndReopen ExportMatrixTest#matrix TextCaptionsExportE2ETest#styledTextAndHighlightCaptionsArePainted TextCaptionsExportE2ETest#videoWithAnimatedTextAndKaraokeKeepsStreams ExportLayersBenchTest#bench ExportLayersBenchTest#portraitLayer LayersE2ETest#layerTransformTransitionExport ExportFpsTest#requestedFrameRateIsHonoured AudioMixE2ETest#overlappingLanesExport AudioMixRmsE2ETest#overlappingLanesSoundOnlyInTheirWindows ExportGradeE2ETest#filterAndAdjustmentsArePainted ExportGradeE2ETest#everyPresetAndSliderMatchesReference LookE2ETest#presetsSlidersUndoRedoAndDraft ExportGradeE2ETest#hdrSourcesExportWithGrades)
 mkdir -p "$OUT/screens" "$OUT/screenrecord"
 : > "$OUT/results.txt"
 
@@ -30,6 +30,16 @@ adb shell settings put global transition_animation_scale 0
 adb shell settings put global animator_duration_scale 0
 adb install -r -g "$APP" && adb install -r -g "$TEST" || { echo "install failed" | tee -a "$OUT/results.txt"; exit 1; }
 adb push "$VIDEO" /data/local/tmp/clio-test.mp4
+# HDR fixture (HLG): HEVC Main10, BT.2020 primaries, arib-std-b67 transfer. Generated here, never committed.
+HLG="$OUT/clio-hlg.mp4"
+if command -v ffmpeg > /dev/null; then
+  ffmpeg -y -loglevel error -f lavfi -i testsrc2=size=1280x720:rate=30:duration=3 -f lavfi -i sine=frequency=330:sample_rate=44100:duration=3 \
+    -c:v libx265 -pix_fmt yuv420p10le -x265-params "colorprim=bt2020:transfer=arib-std-b67:colormatrix=bt2020nc:log-level=error" \
+    -color_primaries bt2020 -color_trc arib-std-b67 -colorspace bt2020nc -tag:v hvc1 -c:a aac -shortest -movflags +faststart "$HLG" \
+    && adb push "$HLG" /data/local/tmp/clio-hlg.mp4 > /dev/null || echo "HLG fixture generation failed" | tee -a "$OUT/results.txt"
+else
+  echo "ffmpeg missing: no HLG fixture" | tee -a "$OUT/results.txt"
+fi
 adb shell rm -rf /sdcard/clio-qa /sdcard/clio-rec; adb shell mkdir -p /sdcard/clio-qa /sdcard/clio-rec
 adb logcat -c
 
