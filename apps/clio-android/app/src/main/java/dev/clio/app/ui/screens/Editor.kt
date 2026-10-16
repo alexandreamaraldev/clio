@@ -223,7 +223,12 @@ fun EditorScreen(
                 TOOL_VOLUME -> VolumePanel(target) { v, fi, fo, m -> actions.setAudio(target?.id, v, fi, fo, m) }
                 TOOL_FORMAT -> FormatPanel(ui.canvasW, ui.canvasH, ui.fill, ui.blurBg, actions::setAspect, actions::setFraming)
                 else -> Timeline(ui.tracks, ui.durationS, playhead, ui.playing, selectedClip, { selectedClip = it }, actions::scrub, actions::addClip,
-                    onTrim = actions::trim, onMove = actions::move)
+                    onTrim = actions::trim, onMove = actions::move,
+                    onRetime = { id, startS, lenS ->
+                        val a = (startS * 1000).roundToInt().toLong(); val b = ((startS + lenS) * 1000).roundToInt().toLong()
+                        // Caption cues are shown with ids -1-index; text clips use their engine id.
+                        if (id >= 0) actions.retimeText(id, a, b) else actions.editCaptions(TextHandles.retimeCaption(ui.captions, (-1 - id).toInt(), a, b))
+                    })
             }
         }
 
@@ -288,6 +293,8 @@ fun Timeline(
     onAdd: () -> Unit = {},
     onTrim: (id: Long, inS: Float, lenS: Float) -> Unit = { _, _, _ -> },
     onMove: (id: Long, toIndex: Int) -> Unit = { _, _ -> },
+    /** Text/caption timing: new start and length in seconds. */
+    onRetime: (id: Long, startS: Float, lenS: Float) -> Unit = { _, _, _ -> },
 ) {
     val haptics = rememberHaptics()
     val density = LocalDensity.current
@@ -369,11 +376,21 @@ fun Timeline(
             tracks.forEach { t ->
                 Box(Modifier.fillMaxWidth().height(if (t.kind == "video") 56.dp else 36.dp).padding(vertical = 3.dp)) {
                     val editable = t.kind == "video" || t.kind == "audio"
+                    val isText = t.kind == "text"
                     t.clips.forEachIndexed { i, c ->
                         key(c.id) {
+                            val anchors = { listOf(playhead()) + tracks.flatMap { it.clips }.filter { it.id != c.id }.flatMap { listOf(it.startS, it.startS + it.lenS) } }
                             ClipView(t.kind, c, selected == c.id, offset, pps, tag = "clip-${t.kind}-$i",
-                                onTrim = if (editable) { l, d -> trimClip(c, l, d, onTrim, haptics) } else null,
-                                onMove = if (t.kind == "video" && t.clips.size > 1) { dxS -> onMove(c.id, reorderIndex(t.clips, i, dxS)); haptics.confirm() } else null,
+                                onTrim = when {
+                                    editable -> { l, d -> trimClip(c, l, d, onTrim, haptics) }
+                                    isText -> { l, d -> retimeEdge(c, l, d, anchors(), onRetime, haptics) }
+                                    else -> null
+                                },
+                                onMove = when {
+                                    t.kind == "video" && t.clips.size > 1 -> { dxS -> onMove(c.id, reorderIndex(t.clips, i, dxS)); haptics.confirm() }
+                                    isText -> { dxS -> moveText(c, dxS, anchors(), onRetime, haptics) }
+                                    else -> null
+                                },
                             ) { onSelect(if (selected == c.id) null else c.id) }
                         }
                     }
@@ -405,6 +422,16 @@ private fun trimClip(c: UiClip, left: Boolean, deltaS: Float, onTrim: (Long, Flo
     if (inS != c.inS || lenS != c.lenS) { onTrim(c.id, inS, lenS); haptics.tick() }
 }
 
+private fun retimeEdge(c: UiClip, left: Boolean, deltaS: Float, anchors: List<Float>, onRetime: (Long, Float, Float) -> Unit, haptics: Haptics) {
+    val (s, l) = TextHandles.trim(c.startS, c.lenS, left, deltaS, anchors)
+    if (s != c.startS || l != c.lenS) { onRetime(c.id, s, l); haptics.tick() }
+}
+
+private fun moveText(c: UiClip, deltaS: Float, anchors: List<Float>, onRetime: (Long, Float, Float) -> Unit, haptics: Haptics) {
+    val s = TextHandles.move(c.startS, c.lenS, deltaS, anchors)
+    if (s != c.startS) { onRetime(c.id, s, c.lenS); haptics.confirm() }
+}
+
 /** Where a clip dragged by [dxS] seconds lands: the slot whose midpoint its centre passes. */
 internal fun reorderIndex(clips: List<UiClip>, from: Int, dxS: Float): Int {
     val c = clips[from]
@@ -414,9 +441,9 @@ internal fun reorderIndex(clips: List<UiClip>, from: Int, dxS: Float): Int {
 }
 
 /**
- * One clip. Tap selects (it lifts on a spring). When selected, video/audio clips show trim handles
+ * One clip. Tap selects (it lifts on a spring). When selected, video/audio/text clips show trim handles
  * (drag either edge, snapped to frames, committed on release). Long-press then drag reorders
- * clips on the main track.
+ * clips on the main track, or retimes a text/caption clip.
  */
 @Composable
 private fun ClipView(
