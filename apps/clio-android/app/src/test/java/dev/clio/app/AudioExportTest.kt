@@ -23,13 +23,14 @@ class AudioExportTest {
 
     private val rate = 44_100L
     private fun clip(id: Long, start: Long, dur: Long, inMs: Long = 0, speed: Float = 1f) =
-        Clip(id.toULong(), "c$id", "file:///a$id.m4a", start.toULong(), dur.toULong(), inMs.toULong(), 0uL, 0u, 0u, speed, 1f, 0uL, 0uL, false, null)
+        Clip(id.toULong(), "c$id", "file:///a$id.m4a", start.toULong(), dur.toULong(), inMs.toULong(), 0uL, 0u, 0u, speed, 1f, 0uL, 0uL, false, null,
+            uniffi.clio_ffi.LayerTransform(0f, 0f, 1f, 0f, 1f), dev.clio.app.engine.Layers.NO_TRANSITION)
 
     private fun snap(vararg lanes: List<Clip>) = Snapshot(
         ProjectSummary("p", 1080u, 1920u, 10_000uL, lanes.size.toUInt(), 0u),
         lanes.mapIndexed { i, l -> Track((100 + i).toULong(), TrackKind.AUDIO, "L$i", l) } +
             Track(1uL, TrackKind.VIDEO, "V", listOf(clip(1, 0, 10_000))),
-        emptyList(), false, false, false, false,
+        emptyList(), emptyList(), null, false, false, false, false,
     )
 
     /** One planned item: silence of n frames, or a clip span [fromMs, toMs) in its source. */

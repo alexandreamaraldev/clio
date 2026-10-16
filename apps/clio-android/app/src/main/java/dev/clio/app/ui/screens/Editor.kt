@@ -1,5 +1,9 @@
 package dev.clio.app.ui.screens
 
+import androidx.compose.ui.semantics.CustomAccessibilityAction
+import androidx.compose.ui.semantics.customActions
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.Canvas
@@ -52,6 +56,7 @@ import kotlin.math.abs
 import kotlin.math.ceil
 import kotlin.math.floor
 import kotlin.math.roundToInt
+import kotlin.math.roundToLong
 
 private data class Tool(val icon: ImageVector, val label: String, val ready: Boolean = true)
 private val tools = listOf(
@@ -59,6 +64,7 @@ private val tools = listOf(
     Tool(Icons.Outlined.MusicNote, "Música"), Tool(Icons.Outlined.ClosedCaption, "Legendas"),
     Tool(Icons.Outlined.Speed, "Velocidade"), Tool(Icons.Outlined.VolumeUp, "Volume"),
     Tool(Icons.Outlined.AspectRatio, "Formato"), Tool(Icons.Outlined.ContentCopy, "Duplicar"),
+    Tool(Icons.Outlined.Layers, "Camadas"), Tool(Icons.Outlined.Compare, "Transição"),
     Tool(Icons.Outlined.Tune, "Ajustes", ready = false), Tool(Icons.Outlined.FilterVintage, "Filtros", ready = false),
     Tool(Icons.Outlined.AutoAwesome, "Efeitos", ready = false),
 )
@@ -70,10 +76,12 @@ const val TOOL_SPEED = 4
 const val TOOL_VOLUME = 5
 const val TOOL_FORMAT = 6
 const val TOOL_DUPLICATE = 7
-private val panelTools = setOf(TOOL_TEXT, TOOL_MUSIC, TOOL_CAPTIONS, TOOL_SPEED, TOOL_VOLUME, TOOL_FORMAT)
+const val TOOL_LAYERS = 8
+const val TOOL_TRANSITION = 9
+private val panelTools = setOf(TOOL_TEXT, TOOL_MUSIC, TOOL_CAPTIONS, TOOL_SPEED, TOOL_VOLUME, TOOL_FORMAT, TOOL_LAYERS, TOOL_TRANSITION)
 
 @Immutable
-data class TextItem(val id: Long, val text: String, val startMs: Long, val endMs: Long)
+data class TextItem(val id: Long, val text: String, val startMs: Long, val endMs: Long, val style: uniffi.clio_ffi.TextStyle = dev.clio.app.engine.StyledText.fallbackStyle)
 
 enum class SaveState { Draft, Saving, Saved }
 
@@ -100,6 +108,10 @@ data class EditorUi(
     val captionStyle: CaptionStyle = CaptionStyle.Clean,
     val recording: Boolean = false,
     val notice: String? = null,
+    val layers: List<UiLayer> = emptyList(),
+    val cuts: List<UiCut> = emptyList(),
+    /** Whisper language; null = auto-detect. */
+    val captionLanguage: String? = null,
 )
 
 interface EditorActions {
@@ -115,8 +127,14 @@ interface EditorActions {
     fun generateCaptions() {}
     fun toggleFill() {}
     fun setCaptionStyle(style: CaptionStyle) {}
+    fun setCaptionLanguage(language: String?) {}
     fun addText() {}
     fun editText(id: Long, text: String) {}
+    fun setTextStyle(id: Long, style: uniffi.clio_ffi.TextStyle) {}
+    /** Timing handles for text clips (start/end in ms). */
+    fun retimeText(id: Long, startMs: Long, endMs: Long) {}
+    /** Timing handles for caption cue `index` (UI clip id `-1 - index`); clamped by the engine. */
+    fun retimeCaption(index: Int, startMs: Long, endMs: Long) {}
     fun pickMusic() {}
     fun removeMusic() {}
     fun editCaptions(caps: List<Engine.Cap>) {}
@@ -130,6 +148,9 @@ interface EditorActions {
     fun detachAudio(clipId: Long?) {}
     fun toggleVoiceover() {}
     fun addSfx(id: String) {}
+    fun addLayer() {}
+    fun setLayerTransform(clipId: Long, t: UiTransform) {}
+    fun setTransition(clipId: Long, style: TransitionStyle, durS: Float) {}
 }
 
 object NoActions : EditorActions
@@ -175,7 +196,9 @@ fun EditorScreen(
             ) {
                 if (ui.blurBg && !ui.fill) BlurBackdrop(ui.tracks.firstOrNull { it.kind == "video" }?.clips.orEmpty(), playhead)
                 preview(ui.fill)
-                TextLayer(ui.texts, playhead, Modifier.align(Alignment.Center).padding(Space.md))
+                LayerStack(ui.layers, playhead, ui.playing, selectedClip, { selectedClip = it; selectedTool = TOOL_LAYERS }, actions::setLayerTransform,
+                    canvasW = ui.canvasW, canvasH = ui.canvasH)
+                StyledTextLayer(ui.texts, playhead, Modifier.matchParentSize())
                 if (ui.hasMedia) Text(when { ui.fill -> "Preencher"; ui.blurBg -> "Desfoque"; else -> "Ajustar" }, style = MaterialTheme.typography.labelSmall, color = ClioColors.OnMedia,
                     modifier = Modifier.align(Alignment.TopEnd).padding(10.dp).pressable(onClick = actions::toggleFill)
                         .clip(ClioShapes.pill).background(ClioColors.MediaScrim).padding(horizontal = 10.dp, vertical = 5.dp))
@@ -186,7 +209,7 @@ fun EditorScreen(
                     Spacer(Modifier.height(Space.sm))
                     Text(stringResource(R.string.action_add_video), style = MaterialTheme.typography.labelLarge, color = ClioColors.OnMedia)
                 }
-                CaptionLayer(ui.captions, capStyle, playhead, Modifier.align(Alignment.BottomCenter).padding(bottom = Space.xl, start = Space.md, end = Space.md))
+                StyledCaptionLayer(ui.captions, capStyle, playhead, Modifier.matchParentSize())
             }
         }
 
@@ -218,15 +241,28 @@ fun EditorScreen(
             (fadeIn(ClioMotion.fade()) + slideInVertically(ClioMotion.slide) { it / 8 }) togetherWith fadeOut(ClioMotion.fade(140))
         }, label = "panel") { panel ->
             when (panel) {
-                TOOL_CAPTIONS -> CaptionsPanel(ui.captions, capStyle, ui.captionStatus, actions::setCaptionStyle, actions::generateCaptions, actions::editCaptions)
-                TOOL_TEXT -> TextPanel(ui.texts, actions::addText, actions::editText)
+                TOOL_CAPTIONS -> CaptionsPanel(ui.captions, capStyle, ui.captionStatus, actions::setCaptionStyle, actions::generateCaptions, actions::editCaptions, ui.captionLanguage, actions::setCaptionLanguage)
+                TOOL_TEXT -> TextPanel(ui.texts, actions::addText, actions::editText, actions::setTextStyle, actions::retimeText)
                 TOOL_MUSIC -> AudioPanel(ui.music, ui.recording, ui.notice, target != null && target.source != null && !target.detached && ui.tracks.any { t -> t.kind == "video" && target in t.clips },
                     actions::pickMusic, actions::removeMusic, actions::toggleVoiceover, { actions.detachAudio(target?.id) }, actions::addSfx)
                 TOOL_SPEED -> SpeedPanel(target) { actions.setSpeed(target?.id, it) }
                 TOOL_VOLUME -> VolumePanel(target) { v, fi, fo, m -> actions.setAudio(target?.id, v, fi, fo, m) }
+                TOOL_LAYERS -> LayersPanel(ui.layers.firstOrNull { it.id == selectedClip }, actions::addLayer, actions::setLayerTransform) {
+                    actions.setLayerTransform(it, UiTransform(0.45f, 0.5f, 0.4f, 0f, 1f))
+                }
+                TOOL_TRANSITION -> {
+                    val cut = ui.cuts.firstOrNull { it.clipId == selectedClip } ?: ui.cuts.minByOrNull { kotlin.math.abs(it.atS - playhead()) }
+                    TransitionPanel(ui.cuts, cut, { selectedClip = it.clipId; actions.scrub((it.atS - 0.8f).coerceAtLeast(0f)) }, actions::setTransition)
+                }
                 TOOL_FORMAT -> FormatPanel(ui.canvasW, ui.canvasH, ui.fill, ui.blurBg, actions::setAspect, actions::setFraming)
                 else -> Timeline(ui.tracks, ui.durationS, playhead, ui.playing, selectedClip, { selectedClip = it }, actions::scrub, actions::addClip,
-                    onTrim = actions::trim, onMove = actions::move)
+                    onTrim = actions::trim, onMove = actions::move,
+                    onRetime = { id, startS, lenS ->
+                        val a = (startS * 1000.0).roundToLong(); val b = ((startS + lenS) * 1000.0).roundToLong()
+                        // Caption cues are shown with ids -1-index; text clips use their engine id. The engine clamps
+                        // (neighbours, [0, duration], 100 ms minimum) and records one undo step per change.
+                        if (id >= 0) actions.retimeText(id, a, b) else actions.retimeCaption((-1 - id).toInt(), a, b)
+                    })
             }
         }
 
@@ -274,22 +310,6 @@ private fun TimeLabel(playhead: () -> Float, total: Float) {
     Text("  /  ${fmt(total)}", style = MaterialTheme.typography.labelMedium, color = ClioColors.TextTertiary)
 }
 
-@Composable
-private fun TextLayer(texts: List<TextItem>, playhead: () -> Float, modifier: Modifier) {
-    val current by remember(texts) { derivedStateOf { val ms = (playhead() * 1000).toLong(); texts.firstOrNull { ms >= it.startMs && ms < it.endMs }?.text } }
-    AnimatedContent(current, modifier,
-        transitionSpec = { (fadeIn(ClioMotion.fade(180)) + scaleIn(ClioMotion.snappy(), 0.9f)) togetherWith fadeOut(ClioMotion.fade(120)) },
-        label = "txt") { t -> if (t != null) CaptionOverlay(t, CaptionStyle.Bold) }
-}
-
-@Composable
-private fun CaptionLayer(caps: List<Engine.Cap>, style: CaptionStyle, playhead: () -> Float, modifier: Modifier) {
-    val current by remember(caps) { derivedStateOf { val ms = (playhead() * 1000).toLong(); caps.firstOrNull { ms in it.startMs..it.endMs }?.text } }
-    AnimatedContent(current, modifier,
-        transitionSpec = { (fadeIn(ClioMotion.fade(180)) + scaleIn(ClioMotion.snappy(), 0.96f)) togetherWith fadeOut(ClioMotion.fade(120)) },
-        label = "cap") { t -> if (t != null) CaptionOverlay(t, style) }
-}
-
 /**
  * Multi-track timeline. Gestures: one-finger drag scrubs (with fling + throttled haptic ticks on
  * whole seconds), pinch zooms with a spring, tap selects a clip (it lifts with a spring).
@@ -307,6 +327,8 @@ fun Timeline(
     onAdd: () -> Unit = {},
     onTrim: (id: Long, inS: Float, lenS: Float) -> Unit = { _, _, _ -> },
     onMove: (id: Long, toIndex: Int) -> Unit = { _, _ -> },
+    /** Text/caption timing: new start and length in seconds. */
+    onRetime: (id: Long, startS: Float, lenS: Float) -> Unit = { _, _, _ -> },
 ) {
     val haptics = rememberHaptics()
     val density = LocalDensity.current
@@ -386,13 +408,23 @@ fun Timeline(
             }
             Spacer(Modifier.height(6.dp))
             tracks.forEach { t ->
-                Box(Modifier.fillMaxWidth().height(if (t.kind == "video") 56.dp else 36.dp).padding(vertical = 3.dp)) {
+                Box(Modifier.fillMaxWidth().height(when (t.kind) { "video" -> 56.dp; "text" -> 54.dp; else -> 36.dp }).padding(vertical = 3.dp)) {
                     val editable = t.kind == "video" || t.kind == "audio"
+                    val isText = t.kind == "text"
                     t.clips.forEachIndexed { i, c ->
                         key(c.id) {
+                            val anchors = { listOf(playhead()) + tracks.flatMap { it.clips }.filter { it.id != c.id }.flatMap { listOf(it.startS, it.startS + it.lenS) } }
                             ClipView(t.kind, c, selected == c.id, offset, pps, tag = "clip-${t.kind}-$i",
-                                onTrim = if (editable) { l, d -> trimClip(c, l, d, onTrim, haptics) } else null,
-                                onMove = if (t.kind == "video" && t.clips.size > 1) { dxS -> onMove(c.id, reorderIndex(t.clips, i, dxS)); haptics.confirm() } else null,
+                                onTrim = when {
+                                    editable -> { l, d -> trimClip(c, l, d, onTrim, haptics) }
+                                    isText -> { l, d -> retimeEdge(c, l, d, anchors(), onRetime, haptics) }
+                                    else -> null
+                                },
+                                onMove = when {
+                                    t.kind == "video" && t.clips.size > 1 -> { dxS -> onMove(c.id, reorderIndex(t.clips, i, dxS)); haptics.confirm() }
+                                    isText -> { dxS -> moveText(c, dxS, anchors(), onRetime, haptics) }
+                                    else -> null
+                                },
                             ) { onSelect(if (selected == c.id) null else c.id) }
                         }
                     }
@@ -424,6 +456,16 @@ private fun trimClip(c: UiClip, left: Boolean, deltaS: Float, onTrim: (Long, Flo
     if (inS != c.inS || lenS != c.lenS) { onTrim(c.id, inS, lenS); haptics.tick() }
 }
 
+private fun retimeEdge(c: UiClip, left: Boolean, deltaS: Float, anchors: List<Float>, onRetime: (Long, Float, Float) -> Unit, haptics: Haptics) {
+    val (s, l) = TextHandles.trim(c.startS, c.lenS, left, deltaS, anchors + TextHandles.ownEdges(c.startS, c.lenS))
+    if (s != c.startS || l != c.lenS) { onRetime(c.id, s, l); haptics.tick() }
+}
+
+private fun moveText(c: UiClip, deltaS: Float, anchors: List<Float>, onRetime: (Long, Float, Float) -> Unit, haptics: Haptics) {
+    val s = TextHandles.move(c.startS, c.lenS, deltaS, anchors + TextHandles.ownEdges(c.startS, c.lenS))
+    if (s != c.startS) { onRetime(c.id, s, c.lenS); haptics.confirm() }
+}
+
 /** Where a clip dragged by [dxS] seconds lands: the slot whose midpoint its centre passes. */
 internal fun reorderIndex(clips: List<UiClip>, from: Int, dxS: Float): Int {
     val c = clips[from]
@@ -433,9 +475,9 @@ internal fun reorderIndex(clips: List<UiClip>, from: Int, dxS: Float): Int {
 }
 
 /**
- * One clip. Tap selects (it lifts on a spring). When selected, video/audio clips show trim handles
+ * One clip. Tap selects (it lifts on a spring). When selected, video/audio/text clips show trim handles
  * (drag either edge, snapped to frames, committed on release). Long-press then drag reorders
- * clips on the main track.
+ * clips on the main track, or retimes a text/caption clip.
  */
 @Composable
 private fun ClipView(
@@ -473,6 +515,12 @@ private fun ClipView(
                     onDragCancel = { dragging = false; dragX = 0f },
                 ) { ch, amount -> ch.consume(); dragX += amount.x }
             })
+            .then(if (kind == "text" && onMove != null) Modifier.semantics {
+                customActions = listOf(
+                    CustomAccessibilityAction("Mover para a esquerda") { curMove?.invoke(-NUDGE_S); true },
+                    CustomAccessibilityAction("Mover para a direita") { curMove?.invoke(NUDGE_S); true },
+                )
+            } else Modifier)
             .pressable(onClick = onClick)
             .clip(ClioShapes.sm)
             .background(tint)
@@ -487,10 +535,20 @@ private fun ClipView(
         if (c.muted) Icon(Icons.Outlined.VolumeOff, null, tint = ClioColors.OnMedia, modifier = Modifier.align(Alignment.TopEnd).padding(4.dp).size(12.dp))
         if (isSel && onTrim != null) {
             val cur by rememberUpdatedState(onTrim)
-            TrimHandle(Modifier.align(Alignment.CenterStart).testTag("trim-left"), onDrag = { trimL = (trimL + it).coerceAtMost(c.lenS * pps() - 24f) }) {
+            val density = LocalDensity.current
+            // Text clips: 48 dp touch targets, shrunk on short clips so a 32 dp middle stays free for
+            // the long-press move (never below the 12 dp bar).
+            val touch = if (kind == "text") with(density) {
+                ((c.lenS * pps() - gap - 32.dp.toPx()) / 2).coerceIn(12.dp.toPx(), 48.dp.toPx()).toDp()
+            } else 12.dp
+            val name = c.label.removePrefix("Aa").trim()
+            val a11y = kind == "text"
+            TrimHandle(Modifier.align(Alignment.CenterStart).testTag("trim-left"), onDrag = { trimL = (trimL + it).coerceAtMost(c.lenS * pps() - 24f) },
+                left = true, touchW = touch, a11y = if (a11y) "Início de $name" else null, onNudge = if (a11y) { d -> cur(true, d) } else null) {
                 val d = trimL / pps(); trimL = 0f; cur(true, d)
             }
-            TrimHandle(Modifier.align(Alignment.CenterEnd).testTag("trim-right"), onDrag = { trimR = (trimR + it).coerceAtLeast(-(c.lenS * pps() - 24f)) }) {
+            TrimHandle(Modifier.align(Alignment.CenterEnd).testTag("trim-right"), onDrag = { trimR = (trimR + it).coerceAtLeast(-(c.lenS * pps() - 24f)) },
+                left = false, touchW = touch, a11y = if (a11y) "Fim de $name" else null, onNudge = if (a11y) { d -> cur(false, d) } else null) {
                 val d = trimR / pps(); trimR = 0f; cur(false, d)
             }
         }
@@ -498,11 +556,23 @@ private fun ClipView(
 }
 
 @Composable
-private fun TrimHandle(modifier: Modifier, onDrag: (Float) -> Unit, onEnd: () -> Unit) {
+private fun TrimHandle(
+    modifier: Modifier, onDrag: (Float) -> Unit,
+    left: Boolean = true, touchW: androidx.compose.ui.unit.Dp = 12.dp, a11y: String? = null, onNudge: ((Float) -> Unit)? = null,
+    onEnd: () -> Unit,
+) {
     var active by remember { mutableStateOf(false) }
     val w by animateDpAsState(if (active) 16.dp else 12.dp, ClioMotion.snappy(), label = "h")
+    // Touch area is wider than the bar (up to 48 dp, never past half the clip so the two never overlap).
     Box(
-        modifier.fillMaxHeight().width(w).background(ClioColors.Clay)
+        modifier.fillMaxHeight().width(maxOf(touchW, w))
+            .then(if (a11y == null) Modifier else Modifier.semantics {
+                contentDescription = a11y
+                if (onNudge != null) customActions = listOf(
+                    CustomAccessibilityAction("Adiantar 0,1 s") { onNudge(-NUDGE_S); true },
+                    CustomAccessibilityAction("Atrasar 0,1 s") { onNudge(NUDGE_S); true },
+                )
+            })
             .pointerInput(Unit) {
                 detectHorizontalDragGestures(
                     onDragStart = { active = true },
@@ -510,9 +580,16 @@ private fun TrimHandle(modifier: Modifier, onDrag: (Float) -> Unit, onEnd: () ->
                     onDragCancel = { active = false; onEnd() },
                 ) { ch, dx -> ch.consume(); onDrag(dx) }
             },
-        contentAlignment = Alignment.Center,
-    ) { Box(Modifier.width(2.dp).height(14.dp).clip(ClioShapes.pill).background(ClioColors.OnMedia)) }
+        contentAlignment = if (left) Alignment.CenterStart else Alignment.CenterEnd,
+    ) {
+        Box(Modifier.fillMaxHeight().width(w).background(ClioColors.Clay), contentAlignment = Alignment.Center) {
+            Box(Modifier.width(2.dp).height(14.dp).clip(ClioShapes.pill).background(ClioColors.OnMedia))
+        }
+    }
 }
+
+/** TalkBack nudge step for text/caption handles and moves. */
+private const val NUDGE_S = 0.1f
 
 /** Blurred, enlarged frame of the current clip behind a fitted preview (API 31+ blur; dimmed fallback). */
 @Composable
@@ -522,7 +599,12 @@ private fun BlurBackdrop(clips: List<UiClip>, playhead: () -> Float) {
     val c = clip ?: return
     val img by produceState<ImageBitmap?>(null, c.source, c.inS) { value = c.source?.let { thumbs(it, (c.inS * 1000).toLong() + 200) } }
     Crossfade(img, animationSpec = ClioMotion.fade(), label = "blur") { b ->
-        if (b != null) Image(b, null, Modifier.fillMaxSize().blur(28.dp).graphicsLayer { alpha = 0.85f }, contentScale = ContentScale.Crop)
+        // Moves with its clip during Slide/Zoom/Fade (read in the draw phase only).
+        if (b != null) Image(b, null, Modifier.fillMaxSize().graphicsLayer {
+            val l = dev.clio.app.engine.Layers.PreviewTransition.look.value
+            translationX = l.transform.x * size.width / 2; translationY = -l.transform.y * size.height / 2
+            scaleX = l.transform.scale; scaleY = l.transform.scale; alpha = 0.85f * l.brightness
+        }.blur(28.dp), contentScale = ContentScale.Crop)
     }
 }
 

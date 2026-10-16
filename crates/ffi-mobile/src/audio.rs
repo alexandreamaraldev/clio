@@ -182,6 +182,9 @@ impl ClioProject {
             fade_in_ms: v.fade_in_ms,
             fade_out_ms: v.fade_out_ms,
             muted: v.muted,
+            // Audio lanes have no canvas placement or transitions.
+            transform: Default::default(),
+            transition: Default::default(),
             detached_to: None,
         };
         s.insert_sorted(lane, a);

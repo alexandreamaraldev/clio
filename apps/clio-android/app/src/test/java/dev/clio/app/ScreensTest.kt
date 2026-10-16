@@ -29,6 +29,11 @@ class ScreensTest {
     @Test fun editorCaptions() = shot(ThemeMode.Dark) { EditorScreen(ui(caps), { 3.0f }, initialTool = TOOL_CAPTIONS) }
     @Test fun editorCaptionsDownloading() = shot(ThemeMode.Dark) { EditorScreen(ui(st = CaptionStatus.Downloading(0.38f, 290)), { 2.4f }, initialTool = TOOL_CAPTIONS) }
     @Test fun editorText() = shot(ThemeMode.Dark) { EditorScreen(ui().copy(texts = listOf(TextItem(1, "Lisboa", 2000, 5000), TextItem(2, "Fim", 9000, 11000))), { 2.4f }, initialTool = TOOL_TEXT) }
+    @Test fun editorStyledText() = shot(ThemeMode.Dark) {
+        val st = dev.clio.app.engine.StyledText.fallbackStyle.copy(font = uniffi.clio_ffi.TextFont.PACIFICO, size = 0.07f, color = 0xFFF2683Cu,
+            strokeColor = 0xFFFFFFFFu, strokeWidth = 0.12f)
+        EditorScreen(ui(caps).copy(texts = listOf(TextItem(1, "Olá, São Paulo!", 2000, 5000, st))), { 3.0f }, initialTool = TOOL_TEXT)
+    }
     @Test fun editorSpeed() = shot(ThemeMode.Dark) { EditorScreen(ui(), { 2.4f }, initialTool = TOOL_SPEED) }
     @Test fun editorVolume() = shot(ThemeMode.Light) { EditorScreen(ui(), { 2.4f }, initialTool = TOOL_VOLUME) }
     @Test fun editorFormat() = shot(ThemeMode.Dark) { EditorScreen(ui().copy(canvasW = 1080, canvasH = 1080, blurBg = true), { 2.4f }, initialTool = TOOL_FORMAT) }
@@ -37,4 +42,28 @@ class ScreensTest {
     @Test fun exportChoose() = shot(ThemeMode.Dark) { ExportSheet(dev.clio.app.engine.ExportState.Choosing, {}, {}, {}) }
     @Test fun exportDone() = shot(ThemeMode.Light) { ExportSheet(dev.clio.app.engine.ExportState.Done(android.net.Uri.EMPTY), {}, {}, {}) }
     @Test fun exportProgress() = shot(ThemeMode.Dark) { ExportSheet(dev.clio.app.engine.ExportState.Running(0.62f, "Stories / Reels / TikTok"), {}, {}, {}) }
+    private val pip = UiLayer(5, "Selfie", "s.mp4", 1000, 4000, 0, 1f, false, 0, UiTransform(0.45f, 0.5f, 0.4f, 12f, 0.85f))
+    private val cuts = listOf(UiCut(1, 0, 4.2f, TransitionStyle.Fade, 0.5f, 3f), UiCut(2, 1, 7.3f, TransitionStyle.None, 0f, 3f))
+    @Test fun layersPanelEmpty() = shot(ThemeMode.Dark) { LayersPanel(null, {}, { _, _ -> }, {}) }
+    @Test fun layersPanelSelected() = shot(ThemeMode.Dark) { LayersPanel(pip, {}, { _, _ -> }, {}) }
+    @Test fun layersPanelLight() = shot(ThemeMode.Light) { LayersPanel(pip.copy(transform = UiTransform(-0.3f, -0.2f, 1.2f, -45f, 0.5f)), {}, { _, _ -> }, {}) }
+    @Test fun transitionPanelFade() = shot(ThemeMode.Dark) { TransitionPanel(cuts, cuts[0], {}, { _, _, _ -> }) }
+    @Test fun transitionPanelNone() = shot(ThemeMode.Light) { TransitionPanel(cuts, cuts[1], {}, { _, _, _ -> }) }
+    @Test fun transitionPanelNoCuts() = shot(ThemeMode.Dark) { TransitionPanel(emptyList(), null, {}, { _, _, _ -> }) }
+    // Image layer: a video layer starts an ExoPlayer, which layoutlib cannot run.
+    @Test fun editorLayers() = shot(ThemeMode.Dark) { EditorScreen(ui().copy(layers = listOf(pip.copy(source = "logo.png", isImage = true)), cuts = cuts), { 2.4f }, initialTool = TOOL_LAYERS) }
+    @Test fun editorTransition() = shot(ThemeMode.Dark) { EditorScreen(ui().copy(layers = listOf(pip.copy(source = "logo.png", isImage = true)), cuts = cuts), { 4.0f }, initialTool = TOOL_TRANSITION) }
+    private fun w(s: Long, e: Long, t: String) = uniffi.clio_ffi.CaptionWord(s.toULong(), e.toULong(), t)
+    private val ptCaps = listOf(Engine.Cap(2000, 4600, "Atenção: você não vai acreditar!",
+        listOf(w(2000, 2600, "Atenção:"), w(2600, 3000, "você"), w(3000, 3400, "não"), w(3400, 3700, "vai"), w(3700, 4600, "acreditar!"))))
+    // Playhead on "não" (3.1 s). Note: Paparazzi has no native engine, so the overlay uses the
+    // StyledText fallback (plain line); these shots cover the preset picker + panel per preset.
+    private fun preset(mode: ThemeMode, s: CaptionStyle) = shot(mode) { EditorScreen(ui(ptCaps).copy(captionStyle = s), { 3.1f }, initialTool = TOOL_CAPTIONS) }
+    @Test fun captionPresetClean() = preset(ThemeMode.Dark, CaptionStyle.Clean)
+    @Test fun captionPresetBold() = preset(ThemeMode.Dark, CaptionStyle.Bold)
+    @Test fun captionPresetBox() = preset(ThemeMode.Light, CaptionStyle.Box)
+    @Test fun captionPresetKaraoke() = preset(ThemeMode.Dark, CaptionStyle.Karaoke)
+    @Test fun captionPresetPop() = preset(ThemeMode.Dark, CaptionStyle.Pop)
+    @Test fun captionPresetBounce() = preset(ThemeMode.Dark, CaptionStyle.Bounce)
+    @Test fun captionPresetHighlight() = preset(ThemeMode.Light, CaptionStyle.Highlight)
 }

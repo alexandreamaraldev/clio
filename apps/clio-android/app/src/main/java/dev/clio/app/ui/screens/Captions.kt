@@ -31,6 +31,10 @@ import dev.clio.app.ui.theme.ClioMotion
 import dev.clio.app.ui.theme.ClioShapes
 import dev.clio.app.ui.theme.Space
 
+/** Whisper language choices (ISO 639-1); null = automatic detection. */
+val SpeechLanguages: List<Pair<String?, String>> = listOf(null to "Automático", "pt" to "Português", "en" to "English", "es" to "Español",
+    "fr" to "Français", "it" to "Italiano", "de" to "Deutsch")
+
 sealed interface CaptionStatus {
     data object Idle : CaptionStatus
     data class Downloading(val progress: Float, val sizeMb: Int) : CaptionStatus
@@ -39,18 +43,12 @@ sealed interface CaptionStatus {
     data class Failed(val message: String) : CaptionStatus
 }
 
-enum class CaptionStyle(val label: String) { Clean("Clean"), Bold("Bold"), Box("Caixa"), Karaoke("Karaokê") }
-
-/** How a caption looks on the preview, per style. */
-@Composable
-fun CaptionOverlay(text: String, style: CaptionStyle, modifier: Modifier = Modifier) {
-    val base = MaterialTheme.typography.titleLarge
-    when (style) {
-        CaptionStyle.Clean -> Text(text, modifier, style = base, color = ClioColors.OnMedia)
-        CaptionStyle.Bold -> Text(text.uppercase(), modifier, style = base.copy(fontWeight = FontWeight.Black, fontSize = 20.sp), color = ClioColors.OnMedia)
-        CaptionStyle.Box -> Text(text, modifier.clip(ClioShapes.sm).background(ClioColors.MediaScrim).padding(horizontal = 10.dp, vertical = 4.dp), style = base, color = ClioColors.OnMedia)
-        CaptionStyle.Karaoke -> Text(text, modifier, style = base.copy(fontWeight = FontWeight.Bold), color = ClioColors.CaptionHighlight)
-    }
+/** Caption looks; word-by-word ones animate from the Whisper word timings (see engine `caption_frame`). */
+enum class CaptionStyle(val label: String, val preset: uniffi.clio_ffi.CaptionPreset) {
+    Clean("Simples", uniffi.clio_ffi.CaptionPreset.CLEAN), Bold("Negrito", uniffi.clio_ffi.CaptionPreset.BOLD),
+    Box("Caixa", uniffi.clio_ffi.CaptionPreset.BOX), Karaoke("Karaokê", uniffi.clio_ffi.CaptionPreset.KARAOKE),
+    Pop("Pop", uniffi.clio_ffi.CaptionPreset.POP), Bounce("Saltitar", uniffi.clio_ffi.CaptionPreset.BOUNCE),
+    Highlight("Destaque", uniffi.clio_ffi.CaptionPreset.HIGHLIGHT),
 }
 
 @Composable
@@ -61,6 +59,8 @@ fun CaptionsPanel(
     onStyle: (CaptionStyle) -> Unit,
     onGenerate: () -> Unit,
     onCaps: (List<Engine.Cap>) -> Unit,
+    language: String? = null,
+    onLanguage: (String?) -> Unit = {},
 ) {
     val generating = status is CaptionStatus.Downloading || status is CaptionStatus.Decoding || status is CaptionStatus.Transcribing
     Column(Modifier.fillMaxWidth().height(220.dp).padding(horizontal = Space.md)) {
@@ -88,6 +88,15 @@ fun CaptionsPanel(
                     .border(1.dp, ClioColors.Hairline, ClioShapes.pill).padding(horizontal = 12.dp, vertical = 6.dp)) {
                     Text(s.label, style = MaterialTheme.typography.labelMedium, color = if (sel) ClioColors.OnPrimary else ClioColors.TextSecondary)
                 }
+            }
+        }
+        Spacer(Modifier.height(6.dp))
+        // Speech language: auto-detect by default (videos are often in another language than the phone).
+        LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+            item { Text("Idioma da fala", style = MaterialTheme.typography.labelSmall, color = ClioColors.TextTertiary) }
+            itemsIndexed(SpeechLanguages) { _, (code, label) ->
+                val sel = code == language
+                Choice(label, sel) { onLanguage(code) }
             }
         }
         AnimatedVisibility(generating || status is CaptionStatus.Failed, enter = fadeIn() + expandVertically(ClioMotion.gentle()), exit = fadeOut() + shrinkVertically()) {
