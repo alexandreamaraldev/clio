@@ -403,6 +403,19 @@ mod tests {
     }
 
     #[test]
+    fn delete_ripples_video_but_not_audio_lanes() {
+        let (p, v) = setup();
+        let a = p.append_clip(v, "a".into(), "a.mp4".into(), 1000).unwrap();
+        let b = p.append_clip(v, "b".into(), "b.mp4".into(), 2000).unwrap();
+        let x = p.add_voiceover("x.m4a".into(), 0, 1000).unwrap();
+        let y = p.add_voiceover("y.m4a".into(), 4000, 1000).unwrap();
+        assert!(p.remove_clip(x));
+        assert_eq!(clip(&p, y).start_ms, 4000, "audio lane keeps positions");
+        assert!(p.remove_clip(a));
+        assert_eq!(clip(&p, b).start_ms, 0, "main track still ripples");
+    }
+
+    #[test]
     fn peaks() {
         let s: Vec<f32> = (0..1000).map(|i| if i < 500 { 0.25 } else { -1.0 }).collect();
         assert_eq!(waveform_peaks(s.clone(), 4), vec![0.5, 0.5, 1.0, 1.0]);
