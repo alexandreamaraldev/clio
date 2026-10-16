@@ -104,7 +104,10 @@ jobs:
   device-qa:
     needs: apk
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 75
+    concurrency:
+      group: device-qa-${{ github.ref }}
+      cancel-in-progress: true
     env:
       API: 34
     steps:

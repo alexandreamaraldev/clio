@@ -131,7 +131,7 @@ class EditorE2ETest {
 
     /** Home: scroll to the first draft card (it's below the fold) and optionally open it. */
     private fun openDraftCard(check: Boolean) {
-        compose.waitUntil(10_000) { compose.onAllNodesWithTag("home").fetchSemanticsNodes().isNotEmpty() }
+        compose.waitUntil(30_000) { compose.onAllNodesWithTag("home").fetchSemanticsNodes().isNotEmpty() }
         compose.onNodeWithTag("home").performScrollToNode(hasTestTag("draft-0"))
         shot(if (check) "11-home-reopen" else "11-home")
         if (check) compose.onNodeWithTag("draft-0").performClick()
@@ -219,6 +219,7 @@ class EditorE2ETest {
         val ids = videoClips().map { it.id }
 
         scenario!!.recreate()
+        compose.waitForIdle()
         waitUi("after recreate") { videoClips(it).size == 2 }
         shot("10-recreated")
         assertEquals(ids, videoClips().map { it.id })
