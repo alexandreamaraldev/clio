@@ -35,3 +35,8 @@
   bate também com as outras amostras (80 → 65, 60 → 41). Vídeos SDR passam sem conversão.
 - Correção: o Exporter usa `setSdrWorkingColorSpace(WORKING_COLOR_SPACE_ORIGINAL)`, que mantém os valores da entrada
   (imagens saem como na prévia/galeria). HDR continua no caminho de tone-map.
+- Resíduo (cinza 128 → 132,130,132 no teste): **não é da exportação**. O arquivo exportado tem exatamente
+  Y126 U128 V128 (BT.709 limitado ideal) no cinza, e vermelho/pele/azul batem com ±1 ao decodificar com a matriz BT.709.
+  Um stream de cinza perfeito codificado só com MediaCodec (sem GL) também é lido como 132,130,132 pelo
+  `MediaMetadataRetriever` do emulador: o desvio é a conversão YUV→RGB do retriever. Testes de cor devem usar
+  `Bt709Frame` (androidTest), que decodifica o Y'CbCr com a matriz BT.709 limitada.
