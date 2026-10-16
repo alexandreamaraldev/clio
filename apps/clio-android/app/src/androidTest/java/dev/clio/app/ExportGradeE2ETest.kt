@@ -1,5 +1,16 @@
 package dev.clio.app
 
+import android.content.Intent
+import androidx.compose.ui.test.*
+import androidx.compose.ui.test.junit4.createEmptyComposeRule
+import androidx.core.content.FileProvider
+import androidx.test.core.app.ActivityScenario
+import dev.clio.app.engine.AppStore
+import dev.clio.app.engine.ExportState
+import dev.clio.app.engine.QaHooks
+import dev.clio.app.ui.components.ClioCharacterConfig
+import dev.clio.app.ui.screens.EditorUi
+import org.junit.Rule
 import android.graphics.Bitmap
 import android.media.MediaMetadataRetriever
 import android.net.Uri
@@ -156,8 +167,8 @@ class ExportGradeE2ETest {
         return Uri.fromFile(dst).toString()
     }
 
-    /** Valid MP4: duration, 720x1280 (rotation-aware), and a video frame that decodes. */
-    private fun assertValid(uri: Uri, expectedMs: Long, label: String) {
+    /** Valid MP4: duration, size (rotation-aware), and video frames that decode. */
+    private fun assertValid(uri: Uri, expectedMs: Long, label: String, expectedSize: Pair<Int, Int> = 720 to 1280) {
         val m = MediaMetadataRetriever()
         try {
             m.setDataSource(ctx, uri)
@@ -167,30 +178,128 @@ class ExportGradeE2ETest {
             val rot = m.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)?.toIntOrNull() ?: 0
             val size = if (rot % 180 != 0) vh to vw else vw to vh
             val frames = listOf(200L, expectedMs / 2, expectedMs - 300).map { m.getFrameAtTime(it * 1000, MediaMetadataRetriever.OPTION_CLOSEST) }
-            val line = "CLIO-QA grade-hdr $label: ${size.first}x${size.second} ${d}ms frames=${frames.map { it != null }}"
+            val line = "CLIO-QA grade-hdr $label: outcome=exported ${size.first}x${size.second} ${d}ms frames=${frames.map { it != null }}"
             android.util.Log.i("ClioQA", line)
-            assertEquals("$label size", 720 to 1280, size)
+            assertEquals("$label size", expectedSize, size)
             assertTrue("$label duration $d vs $expectedMs", kotlin.math.abs(d - expectedMs) <= 350)
             assertTrue("$label video frames not decodable: $line", frames.all { it != null && it.width > 0 })
         } finally { m.release() }
     }
 
+    // ---- HDR through the real UI: each case passes on (a) a valid export or (b) the pt-BR HDR error. ----
+    @get:Rule val compose = createEmptyComposeRule()
+    private var scenario: ActivityScenario<MainActivity>? = null
+    private val uncaught = java.util.Collections.synchronizedList(mutableListOf<Throwable>())
+
+    private fun shell(cmd: String) = inst.uiAutomation.executeShellCommand(cmd).let { android.os.ParcelFileDescriptor.AutoCloseInputStream(it).use { s -> s.readBytes().decodeToString() } }
+    private fun shot(name: String) { shell("mkdir -p /sdcard/clio-qa"); shell("screencap -p /sdcard/clio-qa/$name.png") }
+
+    private fun shared(name: String, devicePath: String): Uri {
+        val dst = File(File(ctx.cacheDir, "import").apply { mkdirs() }, name)
+        android.os.ParcelFileDescriptor.AutoCloseInputStream(inst.uiAutomation.executeShellCommand("cat $devicePath")).use { i -> dst.outputStream().use { i.copyTo(it) } }
+        assertTrue("fixture missing: $devicePath (qa/run-device-qa.sh pushes it)", dst.length() > 10_000)
+        return FileProvider.getUriForFile(ctx, ctx.packageName + ".files", dst)
+    }
+
+    private fun waitUi(what: String, timeoutMs: Long = 30_000, cond: (EditorUi) -> Boolean) {
+        try { compose.waitUntil(timeoutMs) { QaHooks.ui?.let(cond) == true } }
+        catch (e: Throwable) { shot("fail-$what"); throw AssertionError("timed out waiting for: $what; ui=${QaHooks.ui}", e) }
+        compose.waitForIdle()
+    }
+
+    private fun clips(u: EditorUi = QaHooks.ui!!) = u.tracks.first { it.kind == "video" }.clips
+
+    private fun tool(label: String) {
+        compose.onNodeWithTag("tools", useUnmergedTree = true).performScrollToNode(hasText(label))
+        compose.onNode(hasText(label) and hasAnyAncestor(hasTestTag("tools")), useUnmergedTree = true).performClick()
+        compose.waitForIdle()
+    }
+
+    private fun pick(label: String) {
+        compose.onNodeWithTag("filter-strip", useUnmergedTree = true).performScrollToNode(hasContentDescription("Filtro $label"))
+        compose.onNodeWithContentDescription("Filtro $label").performClick()
+        compose.waitForIdle()
+    }
+
+    /**
+     * Agreed contract for outcome (b), from Timeline's code at 0c69dc8 (no fallback-chain commit yet):
+     * the failure text is ExportState.Failed.message shown verbatim on the export sheet, and like every
+     * HDR notice in HdrProbe/Exporter it starts with "Vídeo HDR". It must be user-facing pt-BR, never a
+     * raw exception chain (today it is "Video frame processing error ← ... GL_EXT_YUV_target ...").
+     */
+    private fun assertPtBrHdrError(msg: String, label: String) {
+        assertTrue("$label: export failed with a raw error instead of the pt-BR HDR message: \"$msg\"",
+            msg.startsWith("Vídeo HDR") && listOf("Exception", "GL_", "←", "error").none { msg.contains(it) })
+    }
+
+    private fun assertNoCrash(label: String) {
+        assertTrue("$label: uncaught exception(s): ${uncaught.map { it.toString() }}", uncaught.isEmpty())
+        val fatal = shell("logcat -d -b crash").lines().filter { it.contains(ctx.packageName) || it.contains("FATAL EXCEPTION") }
+        assertTrue("$label: crash buffer: $fatal", fatal.isEmpty())
+        assertEquals("$label: activity alive", androidx.lifecycle.Lifecycle.State.RESUMED, scenario!!.state)
+    }
+
+    /** Export 720p from the UI, then accept outcome (a) or (b); anything else fails. */
+    private fun exportEither(label: String, filterLabel: String, filterId: String) {
+        val ui = QaHooks.ui!!
+        val short = minOf(ui.canvasW, ui.canvasH)
+        val size = if (ui.canvasW <= ui.canvasH) 720 to 720 * ui.canvasH / short else 720 * ui.canvasW / short to 720
+        compose.onNodeWithText("Exportar").performClick()
+        compose.onNodeWithText("720p").performClick()
+        compose.onNodeWithText("Exportar vídeo").performClick()
+        compose.waitUntil(300_000) { QaHooks.export is ExportState.Done || QaHooks.export is ExportState.Failed }
+        compose.waitForIdle(); shot("hdr-$label")
+        assertNoCrash(label)
+        when (val st = QaHooks.export) {
+            is ExportState.Done -> assertValid(st.uri, (ui.durationS * 1000).toLong(), label, size)
+            is ExportState.Failed -> {
+                android.util.Log.i("ClioQA", "CLIO-QA grade-hdr $label: outcome=error \"${st.message}\"")
+                assertPtBrHdrError(st.message, label)
+                compose.onNodeWithText(st.message).assertIsDisplayed()
+                compose.onNodeWithText("Fechar").performClick()
+                compose.waitUntil(10_000) { QaHooks.export is ExportState.Closed }
+                // Editor still usable: undo the grade, then redo it.
+                compose.onNodeWithContentDescription("Desfazer").performClick()
+                waitUi("$label undo after error") { u -> u.grades[clips(u).first().id]?.filter != filterId }
+                compose.onNodeWithContentDescription("Refazer").performClick()
+                waitUi("$label redo after error") { u -> u.grades[clips(u).first().id]?.filter == filterId }
+                assertNoCrash("$label after error")
+            }
+            else -> error("unreachable")
+        }
+    }
+
+    private fun gradeFirst(filterLabel: String, filterId: String) {
+        compose.onNodeWithTag("clip-video-0", useUnmergedTree = true).performClick()
+        tool("Filtros"); pick(filterLabel)
+        waitUi("grade $filterId") { u -> u.grades[clips(u).first().id]?.filter == filterId }
+        tool("Filtros")
+    }
+
     @Test fun hdrSourcesExportWithGrades() {
-        val hdr = hlg(); val sdr = video()
-        // 1) One graded HLG clip.
-        val p1 = ClioProject("hdr-graded", 1080u, 1920u)
-        val v1 = p1.addTrack(TrackKind.VIDEO, "V")
-        val h = p1.appendClip(v1, "hlg", hdr, 3000u); p1.setClipSourceInfo(h, 3000u, 1280u, 720u)
-        p1.setClipGrade(h, Grades.NEUTRAL.copy(filter = "cinema", brightness = 0.2f))
-        val u1 = runBlocking { withTimeout(240_000) { Exporter(ctx).export(p1.snapshot(), ExportSpec("hdr-graded", 720, 1280, 30), CaptionStyle.Clean) {} } }
-        assertValid(u1, 3000, "graded-hlg")
-        // 2) Graded SDR clip followed by an ungraded HLG clip on the same timeline.
-        val p2 = ClioProject("hdr-mixed", 1080u, 1920u)
-        val v2 = p2.addTrack(TrackKind.VIDEO, "V")
-        val s = p2.appendClip(v2, "sdr", sdr, 3000u); p2.setClipSourceInfo(s, 6000u, 1280u, 720u)
-        val h2 = p2.appendClip(v2, "hlg", hdr, 3000u); p2.setClipSourceInfo(h2, 3000u, 1280u, 720u)
-        p2.setClipGrade(s, Grades.NEUTRAL.copy(filter = "pb"))
-        val u2 = runBlocking { withTimeout(240_000) { Exporter(ctx).export(p2.snapshot(), ExportSpec("hdr-mixed", 720, 1280, 30), CaptionStyle.Clean) {} } }
-        assertValid(u2, 6000, "graded-sdr+hlg")
+        ClioCharacterConfig.enabled = false; AppStore(ctx).onboarded = true; QaHooks.ui = null; QaHooks.export = null
+        shell("logcat -c -b crash")
+        val prev = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { t, e -> uncaught += e; android.util.Log.e("ClioQA", "uncaught on ${t.name}", e) }
+        try {
+            val hlg = shared("clio-hlg.mp4", "/data/local/tmp/clio-hlg.mp4")
+            // 1) One graded HLG clip (Cinema).
+            scenario = ActivityScenario.launch(Intent(ctx, MainActivity::class.java).setAction(Intent.ACTION_SEND).setType("video/mp4")
+                .putExtra(Intent.EXTRA_STREAM, hlg).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION))
+            waitUi("hlg imported", 60_000) { it.hasMedia && clips(it).size == 1 }
+            gradeFirst("Cinema", "cinema")
+            exportEither("graded-hlg", "Cinema", "cinema")
+            scenario?.close(); QaHooks.ui = null; QaHooks.export = null
+
+            // 2) Graded SDR clip (P&B) followed by an ungraded HLG clip.
+            val sdr = shared("clio-test.mp4", "/data/local/tmp/clio-test.mp4")
+            scenario = ActivityScenario.launch(Intent(ctx, MainActivity::class.java).setAction(Intent.ACTION_SEND_MULTIPLE).setType("video/*")
+                .putParcelableArrayListExtra(Intent.EXTRA_STREAM, arrayListOf(sdr, hlg)).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION))
+            waitUi("sdr+hlg imported", 60_000) { it.hasMedia && clips(it).size == 2 }
+            gradeFirst("P&B", "pb")
+            exportEither("graded-sdr+hlg", "P&B", "pb")
+        } finally {
+            Thread.setDefaultUncaughtExceptionHandler(prev); scenario?.close()
+        }
     }
 }
