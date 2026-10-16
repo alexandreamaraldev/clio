@@ -25,7 +25,7 @@ internal object LayersMapping {
         return main.dropLast(1).mapIndexed { i, c ->
             UiCut(c.id.toLong(), i, (c.startMs + c.durationMs).toFloat() / 1000f, style(c.transition.kind),
                 c.transition.durationMs.toFloat() / 1000f,
-                minOf(c.durationMs, main[i + 1].durationMs, 3000uL).toFloat() / 1000f)
+                minOf(c.durationMs, main[i + 1].durationMs, LayerLimits.MAX_TRANSITION_MS.toULong()).toFloat() / 1000f)
         }
     }
 

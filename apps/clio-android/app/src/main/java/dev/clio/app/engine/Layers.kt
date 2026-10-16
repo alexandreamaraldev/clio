@@ -57,6 +57,20 @@ object Layers {
         0f, 0f, 0f, 1f,
     )
 
+    /**
+     * Media3 only accepts anchors in -1..1, but layers may sit up to ±[LayerLimits.MAX_LAYER_OFFSET].
+     * Put the background anchor at the clamped point and shift the layer with its own anchor so its
+     * centre still lands at [pos]. Returns (backgroundAnchor, overlayAnchor, anyPartOnCanvas).
+     * [half] is the layer half-size in background NDC.
+     */
+    fun anchor(pos: Float, half: Float): Triple<Float, Float, Boolean> {
+        val bg = pos.coerceIn(-1f, 1f)
+        val h = half.coerceAtLeast(1e-4f)
+        // Overlay anchor `a` (in layer units) placed at bg means centre = bg - a * h.
+        val a = (bg - pos) / h
+        return Triple(bg, a.coerceIn(-1f, 1f), kotlin.math.abs(a) < 1f)
+    }
+
     /** Live preview: ExoPlayer has a single effect chain, so it reads a look pushed once per UI frame. */
     class PreviewLook {
         @Volatile var look: FrameLook = FrameLook(LayerTransform(0f, 0f, 1f, 0f, 1f), 1f)
@@ -97,7 +111,9 @@ object Layers {
     ) : BitmapOverlay() {
         private val clock = LocalClock()
         private val frameMs = (1000 / fps.coerceAtLeast(1)).toLong()
-        private val targetW = (canvasW * c.transform.scale).toInt().coerceIn(2, 4096)
+        /** Wanted on-canvas width; the bitmap is capped at 4096 px and scaled up by OverlaySettings. */
+        private val wantW = canvasW * c.transform.scale.coerceIn(LayerLimits.scaleRange)
+        private val targetW = wantW.toInt().coerceIn(2, 4096)
         private val blank = Bitmap.createBitmap(2, 2, Bitmap.Config.ARGB_8888)
         private var still: Bitmap? = null
         private var retriever: MediaMetadataRetriever? = null
@@ -146,10 +162,19 @@ object Layers {
 
         override fun getOverlaySettings(presentationTimeUs: Long): OverlaySettings {
             val tr = c.transform
+            val b = last ?: still
+            val up = wantW / targetW
+            // Half-size of the layer in background NDC (1 = half the canvas).
+            val halfW = wantW / canvasW
+            val halfH = if (b != null && b.width > 0) halfW * b.height / b.width * canvasW / canvasH else halfW * canvasW / canvasH
+            val (bx, ox, inX) = anchor(tr.x.coerceIn(LayerLimits.offsetRange), halfW)
+            val (by, oy, inY) = anchor(tr.y.coerceIn(LayerLimits.offsetRange), halfH)
             return OverlaySettings.Builder()
-                .setBackgroundFrameAnchor(tr.x.coerceIn(-1f, 1f), tr.y.coerceIn(-1f, 1f))
+                .setBackgroundFrameAnchor(bx, by)
+                .setOverlayFrameAnchor(ox, oy)
+                .setScale(up, up)
                 .setRotationDegrees(tr.rotation)
-                .setAlphaScale(if (visible) tr.opacity else 0f)
+                .setAlphaScale(if (visible && inX && inY) tr.opacity else 0f)
                 .build()
         }
 

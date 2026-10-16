@@ -30,6 +30,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.MediaItem
 import androidx.media3.exoplayer.ExoPlayer
+import dev.clio.app.engine.LayerLimits
 import dev.clio.app.ui.components.pressable
 import dev.clio.app.ui.components.rememberHaptics
 import dev.clio.app.ui.theme.ClioColors
@@ -86,9 +87,9 @@ private fun LayerView(
     var t by remember(l.id, l.transform) { mutableStateOf(l.transform) }
     val state = rememberTransformableState { zoom, pan, rot ->
         t = t.copy(
-            scale = (t.scale * zoom).coerceIn(0.05f, 4f),
-            x = (t.x + pan.x / (w / 2)).coerceIn(-2f, 2f),
-            y = (t.y - pan.y / (h / 2)).coerceIn(-2f, 2f),
+            scale = (t.scale * zoom).coerceIn(LayerLimits.scaleRange),
+            x = (t.x + pan.x / (w / 2)).coerceIn(LayerLimits.offsetRange),
+            y = (t.y - pan.y / (h / 2)).coerceIn(LayerLimits.offsetRange),
             rotation = t.rotation + rot,
         )
     }
@@ -190,15 +191,15 @@ fun LayersPanel(layer: UiLayer?, onAdd: () -> Unit, onTransform: (Long, UiTransf
         val done = { onTransform(layer.id, t) }
         val haptics = rememberHaptics()
         Spacer(Modifier.height(Space.xs))
-        LayerSlider("Tamanho", "${(t.scale * 100).roundToInt()}%", t.scale, 0.05f..2f, { t = t.copy(scale = it) }, done)
+        LayerSlider("Tamanho", "${(t.scale * 100).roundToInt()}%", t.scale, LayerLimits.scaleRange, { t = t.copy(scale = it) }, done)
         LayerSlider("Rotação", "${t.rotation.roundToInt()}°", t.rotation, -180f..180f, {
             val snapped = if (abs(it) < 3f) 0f else it
             if (snapped == 0f && t.rotation != 0f) haptics.tick()
             t = t.copy(rotation = snapped)
         }, done)
         LayerSlider("Opacidade", "${(t.opacity * 100).roundToInt()}%", t.opacity, 0f..1f, { t = t.copy(opacity = it) }, done)
-        LayerSlider("Horizontal", "%.2f".format(t.x).replace('.', ','), t.x, -1f..1f, { t = t.copy(x = if (abs(it) < 0.03f) 0f else it) }, done)
-        LayerSlider("Vertical", "%.2f".format(t.y).replace('.', ','), t.y, -1f..1f, { t = t.copy(y = if (abs(it) < 0.03f) 0f else it) }, done)
+        LayerSlider("Horizontal", "%.2f".format(t.x).replace('.', ','), t.x, LayerLimits.offsetRange, { t = t.copy(x = if (abs(it) < 0.03f) 0f else it) }, done)
+        LayerSlider("Vertical", "%.2f".format(t.y).replace('.', ','), t.y, LayerLimits.offsetRange, { t = t.copy(y = if (abs(it) < 0.03f) 0f else it) }, done)
     }
 }
 
@@ -232,7 +233,7 @@ fun TransitionPanel(cuts: List<UiCut>, cut: UiCut?, onPick: (UiCut) -> Unit, onS
         if (cut.style != TransitionStyle.None) {
             var d by remember(cut.clipId, cut.durS) { mutableFloatStateOf(cut.durS) }
             Spacer(Modifier.height(Space.sm))
-            LayerSlider("Duração", "${"%.1f".format(d).replace('.', ',')} s", d, 0.1f..cut.maxS.coerceAtLeast(0.2f), { d = it }, { onSet(cut.clipId, cut.style, d) })
+            LayerSlider("Duração", "${"%.1f".format(d).replace('.', ',')} s", d, (LayerLimits.MIN_TRANSITION_MS / 1000f)..cut.maxS.coerceAtLeast(LayerLimits.MIN_TRANSITION_MS / 1000f + 0.1f), { d = it }, { onSet(cut.clipId, cut.style, d) })
         }
     }
 }

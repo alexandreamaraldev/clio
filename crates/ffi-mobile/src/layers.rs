@@ -28,6 +28,9 @@ impl Default for LayerTransform {
 
 pub const MIN_LAYER_SCALE: f32 = 0.05;
 pub const MAX_LAYER_SCALE: f32 = 4.0;
+/// Layer centre may sit up to this far from the canvas centre (normalised; 1 = canvas edge).
+/// Mirrored in Kotlin `LayerLimits` (checked by `LayerLimitsTest`).
+pub const MAX_LAYER_OFFSET: f32 = 2.0;
 /// Default PIP: 40% width, top-right-ish.
 pub const PIP_DEFAULT: LayerTransform = LayerTransform { x: 0.45, y: 0.5, scale: 0.4, rotation: 0.0, opacity: 1.0 };
 
@@ -41,8 +44,8 @@ impl LayerTransform {
             r += 360.0;
         }
         LayerTransform {
-            x: f(self.x, 0.0).clamp(-2.0, 2.0),
-            y: f(self.y, 0.0).clamp(-2.0, 2.0),
+            x: f(self.x, 0.0).clamp(-MAX_LAYER_OFFSET, MAX_LAYER_OFFSET),
+            y: f(self.y, 0.0).clamp(-MAX_LAYER_OFFSET, MAX_LAYER_OFFSET),
             scale: f(self.scale, 1.0).clamp(MIN_LAYER_SCALE, MAX_LAYER_SCALE),
             rotation: r,
             opacity: f(self.opacity, 1.0).clamp(0.0, 1.0),
