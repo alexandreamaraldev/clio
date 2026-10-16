@@ -40,10 +40,22 @@ class GradeSchedule(private val approxUs: () -> Long) {
     }
 }
 
-/** HDR (PQ/HLG) detection: Media3 1.4's ColorLut is SDR-only. */
+/**
+ * HDR (PQ/HLG) detection: Media3 1.4's ColorLut is SDR-only. [isHdr] opens a MediaExtractor, so
+ * call it off the main thread (import / [prefetch]); the UI reads [cached], per URI.
+ */
 object HdrProbe {
-    private val cache = HashMap<String, Boolean>()
-    @Synchronized fun isHdr(context: Context, source: String): Boolean = cache.getOrPut(source) {
+    private val cache = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
+    /** Known result, or null while not probed yet (treated as SDR until [prefetch] finishes). */
+    fun cached(source: String): Boolean? = cache[source]
+    /** Probes [sources] on Dispatchers.IO; true when any new result arrived. */
+    suspend fun prefetch(context: Context, sources: Collection<String>): Boolean = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+        var fresh = false
+        for (s in sources) if (!cache.containsKey(s)) { isHdr(context, s); fresh = true }
+        fresh
+    }
+    @androidx.annotation.WorkerThread
+    fun isHdr(context: Context, source: String): Boolean = cache.getOrPut(source) {
         runCatching {
             val e = MediaExtractor()
             try {
@@ -56,5 +68,8 @@ object HdrProbe {
         }.getOrDefault(false)
     }
 
-    const val PREVIEW_NOTICE = "Vídeo HDR: filtros e ajustes não aparecem na prévia; na exportação o vídeo é convertido para SDR."
+    /** Matches Exporter: API 29+ tone-maps the whole export to SDR; below that grades are dropped. */
+    val PREVIEW_NOTICE: String get() = if (android.os.Build.VERSION.SDK_INT >= 29)
+        "Vídeo HDR: filtros e ajustes não aparecem na prévia; na exportação o vídeo é convertido para SDR."
+    else "Vídeo HDR: filtros e ajustes não aparecem na prévia e são ignorados na exportação neste aparelho."
 }

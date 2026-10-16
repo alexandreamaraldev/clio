@@ -70,6 +70,9 @@ class Exporter(private val context: Context) {
         // Layer frame sources live for exactly one export (Exporter instances may be shared).
         val sources = mutableListOf<Layers.FrameSource>()
         try {
+            // Probe HDR off the main thread before building (MediaExtractor per new URI, cached).
+            val videoSources = snap.tracks.firstOrNull { it.kind == TrackKind.VIDEO }?.clips.orEmpty().map { it.source }.filter { !MediaKind.isImage(context, it) }
+            HdrProbe.prefetch(context, videoSources)
             val composition = buildComposition(snap, spec, captionStyle, sources)
             withContext(Dispatchers.Main) { run(composition, out, onProgress) }
             lastLayerStats = LayerStats(sources.sumOf { it.decodes }, sources.sumOf { it.requests })
@@ -85,13 +88,15 @@ class Exporter(private val context: Context) {
             StyledTextItem(c.name, c.startMs.toLong(), (c.startMs + c.durationMs).toLong(), snap.textStyles.firstOrNull { it.clipId == c.id }?.style ?: StyledText.defaultStyle)
         }
         val caps = snap.captions
-        // Media3 1.4's LUT shader is SDR-only (checkArgument(!useHdr)). Graded HDR clips are tone-mapped
-        // to SDR on the GPU (API 29+); below that their grade is skipped and [lastNotice] says so.
+        // Media3 1.4's LUT shader is SDR-only (checkArgument(!useHdr)), and one HDR clip makes the whole
+        // sequence's pipeline HDR. So with ANY HDR clip and any grade the export is tone-mapped to SDR on
+        // the GPU (API 29+); below that all grades are dropped for this export and [lastNotice] says so.
         val graded = Grades.byClip(snap.grades)
-        val hdrGraded = video.any { graded.containsKey(it.id.toLong()) && !MediaKind.isImage(context, it.source) && HdrProbe.isHdr(context, it.source) }
-        toneMap = hdrGraded && android.os.Build.VERSION.SDK_INT >= 29
-        lastNotice = if (hdrGraded && !toneMap) "Vídeo HDR: os filtros foram ignorados nesta exportação (requer Android 10 ou mais recente)." else null
-        val gradeOf = if (hdrGraded && !toneMap) graded.filterKeys { id -> video.first { it.id.toLong() == id }.let { MediaKind.isImage(context, it.source) || !HdrProbe.isHdr(context, it.source) } } else graded
+        val anyHdr = video.any { !MediaKind.isImage(context, it.source) && HdrProbe.cached(it.source) == true }
+        toneMap = anyHdr && graded.isNotEmpty() && android.os.Build.VERSION.SDK_INT >= 29
+        val dropGrades = anyHdr && graded.isNotEmpty() && !toneMap
+        lastNotice = if (dropGrades) "Vídeo HDR: os filtros foram ignorados nesta exportação (requer Android 10 ou mais recente)." else null
+        val gradeOf = if (dropGrades) emptyMap() else graded
         val totalMs = snap.summary.durationMs.toLong()
         val blur = snap.blurBg && !snap.fill
 
@@ -153,6 +158,10 @@ class Exporter(private val context: Context) {
         try {
             suspendCancellableCoroutine { cont ->
                 transformer = Transformer.Builder(context)
+                    // Keep SDR inputs in their own colour space. The DEFAULT working space converts sRGB
+                    // stills to SMPTE 170M (smpte170mOetf(srgbEotf(x))), so grey 128 encoded as 115.
+                    .setVideoFrameProcessorFactory(androidx.media3.effect.DefaultVideoFrameProcessor.Factory.Builder()
+                        .setSdrWorkingColorSpace(androidx.media3.effect.DefaultVideoFrameProcessor.WORKING_COLOR_SPACE_ORIGINAL).build())
                     .setVideoMimeType(MimeTypes.VIDEO_H264)
                     .setAudioMimeType(MimeTypes.AUDIO_AAC)
                     // Heavy effect chains (blur, 4K) on slow devices can legitimately exceed the 10 s default.

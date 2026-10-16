@@ -98,10 +98,16 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
     private val bakeRequests = MutableSharedFlow<Unit>(extraBufferCapacity = 1, onBufferOverflow = kotlinx.coroutines.channels.BufferOverflow.DROP_OLDEST)
     private var lastRedrawMs = 0L
     private var hdrInPlaylist = false
+    private var lastPlanKey: Any? = null
     private val bakeJob = viewModelScope.launch {
         bakeRequests.collect {
             val clips = videoClips; val gs = grades; val draft = gradeDraft
             val app = getApplication<Application>()
+            // Only re-bake/redraw when the per-item plan (source spans + resolved grades) changed;
+            // planes themselves are cached per grade in the shared Grades.Library.
+            val key = clips.map { c -> Triple(c.source, Mix.spanMs(c.durationMs.toLong(), c.speed) to c.durationMs, draft?.takeIf { it.first == c.id.toLong() }?.second ?: gs[c.id.toLong()]) }
+            if (key == lastPlanKey) return@collect
+            lastPlanKey = key
             val plan = withContext(Dispatchers.Default) {
                 var at = 0L
                 val starts = LongArray(clips.size); val planes = Array(clips.size) { i ->
@@ -250,7 +256,10 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
         val t = videoClips.indices.any { Layers.hasTransition(videoClips, it) }
         val app = getApplication<Application>()
         // Media3 1.4's LUT shader is SDR-only: with an HDR clip in the playlist the grade is not previewed.
-        hdrInPlaylist = videoClips.any { !MediaKind.isImage(app, it.source) && HdrProbe.isHdr(app, it.source) }
+        val vids = videoClips.map { it.source }.filter { !MediaKind.isImage(app, it) }
+        hdrInPlaylist = vids.any { HdrProbe.cached(it) == true }
+        // Unknown URIs are probed in the background, then the effects are re-synced.
+        if (vids.any { HdrProbe.cached(it) == null }) viewModelScope.launch { if (HdrProbe.prefetch(app, vids)) redrawPaused() }
         val g = !hdrInPlaylist && (gradeDraft != null || videoClips.any { grades.containsKey(it.id.toLong()) })
         bakeRequests.tryEmit(Unit)
         if ((t to g) == effectsOn) return
