@@ -58,6 +58,9 @@ data class ExportSpec(val label: String, val width: Int, val height: Int, val fp
  */
 @OptIn(UnstableApi::class)
 class Exporter(private val context: Context) {
+    /** Diagnostics toggle used by the device QA export matrix. */
+    internal var frameDrop = true
+
 
     suspend fun export(snap: Snapshot, spec: ExportSpec, captionStyle: CaptionStyle, onProgress: (Float) -> Unit): Uri {
         val out = File(context.cacheDir, "export-${System.currentTimeMillis()}.mp4")
@@ -89,7 +92,7 @@ class Exporter(private val context: Context) {
             )
             val video = mutableListOf<androidx.media3.common.Effect>()
             if (speed != 1f) video += SpeedChangeEffect(speed)
-            if (!isImage) video += FrameDropEffect.createDefaultFrameDropEffect(spec.fps.toFloat())
+            if (!isImage && frameDrop) video += FrameDropEffect.createDefaultFrameDropEffect(spec.fps.toFloat())
             if (blur && c.width > 0u && c.height > 0u) {
                 // Stretch to the canvas, blur it, and draw the sharp frame on top at its fitted size.
                 val (sx, sy) = Mix.fitScale(c.width.toInt(), c.height.toInt(), spec.width, spec.height)

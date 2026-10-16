@@ -255,7 +255,8 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
             exportState = try {
                 ExportState.Done(exporter.export(snap, spec, style) { p -> exportState = ExportState.Running(p, spec.label) })
             } catch (e: CancellationException) { throw e } catch (e: Throwable) {
-                ExportState.Failed(e.message ?: e.javaClass.simpleName)
+                android.util.Log.e("ClioExport", "export failed", e)
+                ExportState.Failed(generateSequence(e) { it.cause }.take(4).joinToString(" ← ") { it.message ?: it.javaClass.simpleName })
             }
         }
     }

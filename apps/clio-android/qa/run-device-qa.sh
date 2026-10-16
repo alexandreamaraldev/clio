@@ -6,7 +6,7 @@ set -uo pipefail
 APP=$1; TEST=$2; VIDEO=$3; OUT=$4
 PKG=dev.clio.app
 RUNNER=$PKG.test/androidx.test.runner.AndroidJUnitRunner
-TESTS=(fullEditAndExport splitSurvivesRecreateAndReopen)
+TESTS=(EditorE2ETest#fullEditAndExport EditorE2ETest#splitSurvivesRecreateAndReopen ExportMatrixTest#matrix)
 mkdir -p "$OUT/screens" "$OUT/screenrecord"
 : > "$OUT/results.txt"
 
@@ -27,9 +27,9 @@ fail=0
 for t in "${TESTS[@]}"; do
   adb shell pm clear $PKG > /dev/null   # fresh drafts/prefs for every test
   echo "::group::$t"
-  adb shell am instrument -w -e class "$PKG.EditorE2ETest#$t" $RUNNER | tee "$OUT/$t.txt"
+  adb shell am instrument -w -e class "$PKG.$t" $RUNNER | tee "$OUT/${t//#/_}.txt"
   echo "::endgroup::"
-  if grep -q "^OK (1 test)" "$OUT/$t.txt"; then echo "PASS $t" >> "$OUT/results.txt"; else echo "FAIL $t" >> "$OUT/results.txt"; fail=1; fi
+  if grep -q "^OK (1 test)" "$OUT/${t//#/_}.txt"; then echo "PASS $t" >> "$OUT/results.txt"; else echo "FAIL $t" >> "$OUT/results.txt"; fail=1; fi
 done
 
 kill $REC 2>/dev/null; adb shell pkill -INT screenrecord; sleep 4
