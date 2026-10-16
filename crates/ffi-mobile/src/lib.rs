@@ -37,6 +37,45 @@ pub struct Clip {
     pub duration_ms: u64,
     /// Offset into the source media where this clip begins (changes after a split).
     pub in_ms: u64,
+    /// Length of the source media; 0 = unbounded (stills, text).
+    #[serde(default)]
+    pub source_ms: u64,
+    /// Source pixel size after rotation (0 = unknown).
+    #[serde(default)]
+    pub width: u32,
+    #[serde(default)]
+    pub height: u32,
+    /// Constant playback speed (0.1..=10). The clip consumes `duration_ms * speed` of source.
+    #[serde(default = "one")]
+    pub speed: f32,
+    /// Linear gain, 0..=2.
+    #[serde(default = "one")]
+    pub volume: f32,
+    #[serde(default)]
+    pub fade_in_ms: u64,
+    #[serde(default)]
+    pub fade_out_ms: u64,
+    #[serde(default)]
+    pub muted: bool,
+}
+
+fn one() -> f32 {
+    1.0
+}
+
+pub const MIN_SPEED: f32 = 0.1;
+pub const MAX_SPEED: f32 = 10.0;
+/// Shortest clip a trim may produce.
+pub const MIN_CLIP_MS: u64 = 100;
+
+impl Clip {
+    fn new(id: u64, name: String, source: String, start_ms: u64, duration_ms: u64) -> Self {
+        Clip { id, name, source, start_ms, duration_ms, in_ms: 0, source_ms: 0, width: 0, height: 0, speed: 1.0, volume: 1.0, fade_in_ms: 0, fade_out_ms: 0, muted: false }
+    }
+    /// Source span consumed by this clip.
+    fn span_ms(&self) -> u64 {
+        (self.duration_ms as f64 * self.speed as f64).round() as u64
+    }
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -80,6 +119,9 @@ struct State {
     /// Fill the frame (crop) instead of fitting (letterbox) when media aspect differs.
     #[serde(default)]
     fill: bool,
+    /// When fitting, fill the empty area with a blurred copy of the frame.
+    #[serde(default)]
+    blur_bg: bool,
     #[serde(skip)]
     history: History,
 }
@@ -88,6 +130,10 @@ struct State {
 #[derive(Clone)]
 struct Snap {
     name: String,
+    width: u32,
+    height: u32,
+    fill: bool,
+    blur_bg: bool,
     next_id: u64,
     tracks: Vec<Track>,
     captions: Vec<Caption>,
@@ -103,10 +149,14 @@ const MAX_UNDO: usize = 100;
 
 impl State {
     fn snap(&self) -> Snap {
-        Snap { name: self.project.name.clone(), next_id: self.next_id, tracks: self.tracks.clone(), captions: self.captions.clone() }
+        Snap { name: self.project.name.clone(), width: self.width, height: self.height, fill: self.fill, blur_bg: self.blur_bg, next_id: self.next_id, tracks: self.tracks.clone(), captions: self.captions.clone() }
     }
     fn restore(&mut self, x: Snap) {
         self.project.name = x.name;
+        self.width = x.width;
+        self.height = x.height;
+        self.fill = x.fill;
+        self.blur_bg = x.blur_bg;
         self.next_id = x.next_id;
         self.tracks = x.tracks;
         self.captions = x.captions;
@@ -119,6 +169,22 @@ impl State {
             self.history.undo.remove(0);
         }
         self.history.redo.clear();
+    }
+    fn find(&self, clip_id: u64) -> Option<(usize, usize)> {
+        self.tracks.iter().enumerate().find_map(|(ti, t)| t.clips.iter().position(|c| c.id == clip_id).map(|ci| (ti, ci)))
+    }
+    /// Main (video) tracks are magnetic: clips sit back to back from 0.
+    fn relayout(&mut self, ti: usize) {
+        let t = &mut self.tracks[ti];
+        if t.kind != TrackKind::Video {
+            t.clips.sort_by_key(|c| c.start_ms);
+            return;
+        }
+        let mut at = 0;
+        for c in &mut t.clips {
+            c.start_ms = at;
+            at += c.duration_ms;
+        }
     }
     fn max_id(&self) -> u64 {
         self.tracks.iter().flat_map(|t| std::iter::once(t.id).chain(t.clips.iter().map(|c| c.id))).max().unwrap_or(0)
@@ -134,6 +200,7 @@ pub struct Snapshot {
     pub can_undo: bool,
     pub can_redo: bool,
     pub fill: bool,
+    pub blur_bg: bool,
 }
 
 /// Draft file format version (bump on breaking changes).
@@ -166,6 +233,7 @@ impl ClioProject {
                 tracks: Vec::new(),
                 captions: Vec::new(),
                 fill: false,
+                blur_bg: false,
                 history: History::default(),
             }),
         })
@@ -213,6 +281,148 @@ impl ClioProject {
         self.st().fill = fill;
     }
 
+    /// Canvas framing: `fill` crops to cover; otherwise fit, with a blurred backdrop if `blur_bg`.
+    pub fn set_framing(&self, fill: bool, blur_bg: bool) {
+        let mut s = self.st();
+        if s.fill == fill && s.blur_bg == blur_bg {
+            return;
+        }
+        s.checkpoint();
+        s.fill = fill;
+        s.blur_bg = blur_bg && !fill;
+    }
+
+    /// Changes the canvas size (aspect ratio), e.g. 1080x1920 for 9:16.
+    pub fn set_canvas(&self, width: u32, height: u32) -> Result<(), ClioError> {
+        filmcraft_project::validate_frame_size(width, height).map_err(|msg| ClioError::Invalid { msg })?;
+        let mut s = self.st();
+        if s.width == width && s.height == height {
+            return Ok(());
+        }
+        s.checkpoint();
+        s.width = width;
+        s.height = height;
+        Ok(())
+    }
+
+    /// Sets a clip's source in-point and timeline length (trim handles). Clamped to the source
+    /// media and to [`MIN_CLIP_MS`]. On the main track the timeline ripples; on overlay tracks the
+    /// clip keeps its out-point when the left edge moves.
+    pub fn trim_clip(&self, clip_id: u64, in_ms: u64, duration_ms: u64) -> Result<(), ClioError> {
+        let mut s = self.st();
+        let (ti, ci) = s.find(clip_id).ok_or_else(|| ClioError::Invalid { msg: format!("no clip {clip_id}") })?;
+        let c = s.tracks[ti].clips[ci].clone();
+        let sp = c.speed as f64;
+        let mut in_ms = in_ms;
+        let mut dur = duration_ms.max(MIN_CLIP_MS);
+        if c.source_ms > 0 {
+            in_ms = in_ms.min(c.source_ms.saturating_sub((MIN_CLIP_MS as f64 * sp) as u64));
+            let max_dur = ((c.source_ms - in_ms) as f64 / sp).floor() as u64;
+            dur = dur.min(max_dur.max(1));
+        }
+        if in_ms == c.in_ms && dur == c.duration_ms {
+            return Ok(());
+        }
+        s.checkpoint();
+        let kind = s.tracks[ti].kind;
+        let x = &mut s.tracks[ti].clips[ci];
+        if kind != TrackKind::Video {
+            let out = c.start_ms + c.duration_ms;
+            if in_ms != c.in_ms {
+                x.start_ms = out.saturating_sub(dur);
+            }
+        }
+        x.in_ms = in_ms;
+        x.duration_ms = dur;
+        s.relayout(ti);
+        Ok(())
+    }
+
+    /// Moves a clip to `to_index` within its track (drag reorder on the main track).
+    pub fn move_clip(&self, clip_id: u64, to_index: u32) -> Result<(), ClioError> {
+        let mut s = self.st();
+        let (ti, ci) = s.find(clip_id).ok_or_else(|| ClioError::Invalid { msg: format!("no clip {clip_id}") })?;
+        if s.tracks[ti].kind != TrackKind::Video {
+            return Err(ClioError::Invalid { msg: "reorder is only for the main track".into() });
+        }
+        let to = (to_index as usize).min(s.tracks[ti].clips.len() - 1);
+        if to == ci {
+            return Ok(());
+        }
+        s.checkpoint();
+        let c = s.tracks[ti].clips.remove(ci);
+        s.tracks[ti].clips.insert(to, c);
+        s.relayout(ti);
+        Ok(())
+    }
+
+    /// Duplicates a clip right after itself; returns the new clip id.
+    pub fn duplicate_clip(&self, clip_id: u64) -> Result<u64, ClioError> {
+        let mut s = self.st();
+        let (ti, ci) = s.find(clip_id).ok_or_else(|| ClioError::Invalid { msg: format!("no clip {clip_id}") })?;
+        s.checkpoint();
+        let id = s.next_id;
+        s.next_id += 1;
+        let mut c = s.tracks[ti].clips[ci].clone();
+        c.id = id;
+        c.start_ms += c.duration_ms;
+        s.tracks[ti].clips.insert(ci + 1, c);
+        s.relayout(ti);
+        Ok(id)
+    }
+
+    /// Constant speed, clamped to 0.1x..=10x. The source range is kept, so the clip's timeline
+    /// length becomes `span / speed`.
+    pub fn set_clip_speed(&self, clip_id: u64, speed: f32) -> Result<(), ClioError> {
+        if !speed.is_finite() {
+            return Err(ClioError::Invalid { msg: "speed".into() });
+        }
+        let speed = speed.clamp(MIN_SPEED, MAX_SPEED);
+        let mut s = self.st();
+        let (ti, ci) = s.find(clip_id).ok_or_else(|| ClioError::Invalid { msg: format!("no clip {clip_id}") })?;
+        let c = &s.tracks[ti].clips[ci];
+        if (c.speed - speed).abs() < 1e-4 {
+            return Ok(());
+        }
+        let span = c.span_ms();
+        s.checkpoint();
+        let x = &mut s.tracks[ti].clips[ci];
+        x.speed = speed;
+        x.duration_ms = ((span as f64 / speed as f64).round() as u64).max(1);
+        x.fade_in_ms = x.fade_in_ms.min(x.duration_ms);
+        x.fade_out_ms = x.fade_out_ms.min(x.duration_ms);
+        s.relayout(ti);
+        Ok(())
+    }
+
+    /// Per-clip audio: gain 0..=2, fades (clamped so they fit inside the clip), mute.
+    pub fn set_clip_audio(&self, clip_id: u64, volume: f32, fade_in_ms: u64, fade_out_ms: u64, muted: bool) -> Result<(), ClioError> {
+        let mut s = self.st();
+        let (ti, ci) = s.find(clip_id).ok_or_else(|| ClioError::Invalid { msg: format!("no clip {clip_id}") })?;
+        let d = s.tracks[ti].clips[ci].duration_ms;
+        let volume = if volume.is_finite() { volume.clamp(0.0, 2.0) } else { 1.0 };
+        let fi = fade_in_ms.min(d);
+        let fo = fade_out_ms.min(d - fi);
+        s.checkpoint();
+        let x = &mut s.tracks[ti].clips[ci];
+        x.volume = volume;
+        x.fade_in_ms = fi;
+        x.fade_out_ms = fo;
+        x.muted = muted;
+        Ok(())
+    }
+
+    /// Records source length and pixel size for a clip (used by trim clamping and framing).
+    pub fn set_clip_source_info(&self, clip_id: u64, source_ms: u64, width: u32, height: u32) -> bool {
+        let mut s = self.st();
+        let Some((ti, ci)) = s.find(clip_id) else { return false };
+        let x = &mut s.tracks[ti].clips[ci];
+        x.source_ms = source_ms;
+        x.width = width;
+        x.height = height;
+        true
+    }
+
     /// Places a clip at an explicit time (text overlays, music); returns the clip id.
     pub fn insert_clip(&self, track_id: u64, name: String, source: String, start_ms: u64, duration_ms: u64) -> Result<u64, ClioError> {
         if duration_ms == 0 {
@@ -227,7 +437,7 @@ impl ClioProject {
         s.next_id += 1;
         let t = s.tracks.iter_mut().find(|t| t.id == track_id).ok_or_else(|| ClioError::Invalid { msg: "track".into() })?;
         let at = t.clips.partition_point(|c| c.start_ms <= start_ms);
-        t.clips.insert(at, Clip { id, name, source, start_ms, duration_ms, in_ms: 0 });
+        t.clips.insert(at, Clip::new(id, name, source, start_ms, duration_ms));
         Ok(id)
     }
 
@@ -274,6 +484,7 @@ impl ClioProject {
             can_undo: !s.history.undo.is_empty(),
             can_redo: !s.history.redo.is_empty(),
             fill: s.fill,
+            blur_bg: s.blur_bg,
         }
     }
 
@@ -322,7 +533,7 @@ impl ClioProject {
             .find(|t| t.id == track_id)
             .ok_or_else(|| ClioError::Invalid { msg: format!("no track {track_id}") })?;
         let start_ms = track.clips.last().map_or(0, |c| c.start_ms + c.duration_ms);
-        track.clips.push(Clip { id, name, source, start_ms, duration_ms, in_ms: 0 });
+        track.clips.push(Clip::new(id, name, source, start_ms, duration_ms));
         s.next_id += 1;
         Ok(id)
     }
@@ -338,8 +549,17 @@ impl ClioProject {
                 if at_ms <= c.start_ms || at_ms >= c.start_ms + c.duration_ms {
                     return Err(ClioError::Invalid { msg: "split point outside clip".into() });
                 }
-                t.clips[i].duration_ms = at_ms - c.start_ms;
-                let right = Clip { id: new_id, name: c.name, source: c.source, start_ms: at_ms, duration_ms: c.start_ms + c.duration_ms - at_ms, in_ms: c.in_ms + (at_ms - c.start_ms) };
+                let left_ms = at_ms - c.start_ms;
+                t.clips[i].duration_ms = left_ms;
+                t.clips[i].fade_out_ms = 0;
+                let right = Clip {
+                    id: new_id,
+                    start_ms: at_ms,
+                    duration_ms: c.start_ms + c.duration_ms - at_ms,
+                    in_ms: c.in_ms + (left_ms as f64 * c.speed as f64).round() as u64,
+                    fade_in_ms: 0,
+                    ..c
+                };
                 t.clips.insert(i + 1, right);
                 s.next_id += 1;
                 s.history.undo.push(before);
@@ -581,5 +801,98 @@ mod tests {
         assert_eq!(q.tracks()[0].clips[1].in_ms, 1000);
         let srt = captions_to_file(generate_captions(8000), false);
         assert!(srt.contains("00:00:00,000 --> "), "{srt}");
+    }
+
+    fn proj() -> (ClioProject, u64, u64, u64) {
+        let p = ClioProject::new("t".into(), 1080, 1920).unwrap();
+        let v = p.add_track(TrackKind::Video, "V".into());
+        let a = p.append_clip(v, "a".into(), "a.mp4".into(), 4000).unwrap();
+        let b = p.append_clip(v, "b".into(), "b.mp4".into(), 2000).unwrap();
+        p.set_clip_source_info(a, 4000, 1920, 1080);
+        p.set_clip_source_info(b, 2000, 1080, 1920);
+        (p, v, a, b)
+    }
+    fn clips(p: &ClioProject) -> Vec<Clip> {
+        p.tracks()[0].clips.clone()
+    }
+
+    #[test]
+    fn trim_ripples_and_clamps() {
+        let (p, _, a, b) = proj();
+        p.trim_clip(a, 1000, 2000).unwrap();
+        let c = clips(&p);
+        assert_eq!((c[0].in_ms, c[0].duration_ms), (1000, 2000));
+        assert_eq!(c[1].start_ms, 2000);
+        assert_eq!(p.summary().duration_ms, 4000);
+        // Past the end of the source is clamped.
+        p.trim_clip(a, 1000, 99_000).unwrap();
+        assert_eq!(clips(&p)[0].duration_ms, 3000);
+        p.trim_clip(b, 0, 1).unwrap();
+        assert_eq!(clips(&p)[1].duration_ms, MIN_CLIP_MS);
+        assert!(p.undo());
+        assert_eq!(clips(&p)[1].duration_ms, 2000);
+    }
+
+    #[test]
+    fn reorder_duplicate_delete() {
+        let (p, _, a, b) = proj();
+        p.move_clip(b, 0).unwrap();
+        let c = clips(&p);
+        assert_eq!((c[0].id, c[0].start_ms, c[1].id, c[1].start_ms), (b, 0, a, 2000));
+        let d = p.duplicate_clip(b).unwrap();
+        let c = clips(&p);
+        assert_eq!(c.iter().map(|c| c.id).collect::<Vec<_>>(), vec![b, d, a]);
+        assert_eq!(c[2].start_ms, 4000);
+        assert!(p.remove_clip(d));
+        assert_eq!(p.summary().duration_ms, 6000);
+        p.undo();
+        p.undo();
+        assert_eq!(clips(&p).len(), 2);
+        p.undo();
+        assert_eq!(clips(&p)[0].id, a);
+    }
+
+    #[test]
+    fn speed_changes_length_and_split_keeps_source() {
+        let (p, _, a, b) = proj();
+        p.set_clip_speed(a, 2.0).unwrap();
+        assert_eq!(clips(&p)[0].duration_ms, 2000);
+        assert_eq!(clips(&p)[1].start_ms, 2000);
+        p.set_clip_speed(a, 100.0).unwrap();
+        assert_eq!(clips(&p)[0].speed, MAX_SPEED);
+        assert_eq!(clips(&p)[0].duration_ms, 400);
+        p.set_clip_speed(a, 0.5).unwrap();
+        assert_eq!(clips(&p)[0].duration_ms, 8000);
+        let r = p.split_clip(a, 2000).unwrap();
+        let c = clips(&p);
+        assert_eq!(c[1].id, r);
+        assert_eq!((c[1].in_ms, c[1].speed), (1000, 0.5));
+        p.set_clip_audio(b, 5.0, 3000, 3000, true).unwrap();
+        let c = clips(&p);
+        assert_eq!((c[2].volume, c[2].fade_in_ms, c[2].fade_out_ms, c[2].muted), (2.0, 2000, 0, true));
+    }
+
+    #[test]
+    fn canvas_and_framing_are_undoable_and_saved() {
+        let (p, ..) = proj();
+        p.set_canvas(1080, 1080).unwrap();
+        p.set_framing(false, true);
+        let s = p.snapshot();
+        assert_eq!((s.summary.width, s.summary.height, s.blur_bg), (1080, 1080, true));
+        let q = ClioProject::from_draft_json(p.to_draft_json().unwrap()).unwrap();
+        assert!(q.snapshot().blur_bg);
+        assert_eq!(q.summary().height, 1080);
+        p.undo();
+        p.undo();
+        assert_eq!(p.summary().height, 1920);
+        assert!(p.set_canvas(0, 10).is_err());
+    }
+
+    #[test]
+    fn old_drafts_load_with_defaults() {
+        let (p, ..) = proj();
+        let j = p.to_draft_json().unwrap().replace(",\"speed\":1.0", "").replace(",\"volume\":1.0", "");
+        let q = ClioProject::from_draft_json(j).unwrap();
+        assert_eq!((q.tracks()[0].clips[0].speed, q.tracks()[0].clips[0].volume), (1.0, 1.0));
     }
 }
