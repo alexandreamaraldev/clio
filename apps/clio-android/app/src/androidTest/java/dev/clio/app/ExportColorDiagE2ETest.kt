@@ -93,7 +93,10 @@ class ExportColorDiagE2ETest {
                 val img = codec.getOutputImage(o)
                 if (img != null && info.presentationTimeUs >= 400_000) {
                     res = swatches.indices.joinToString(" ") { i ->
-                        val cy = img.height * (2 * i + 1) / 8; val cx = img.width / 2
+                        // Bands run along the long axis (the encoder may store the frame rotated).
+                        val land = img.width > img.height
+                        val cy = if (land) img.height / 2 else img.height * (2 * i + 1) / 8
+                        val cx = if (land) img.width * (2 * i + 1) / 8 else img.width / 2
                         fun at(pl: Int, x: Int, y: Int): Int { val p = img.planes[pl]; return p.buffer.get(y * p.rowStride + x * p.pixelStride).toInt() and 255 }
                         "Y${at(0, cx, cy)}U${at(1, cx / 2, cy / 2)}V${at(2, cx / 2, cy / 2)}"
                     }
@@ -103,10 +106,46 @@ class ExportColorDiagE2ETest {
             }
         }
         codec.stop(); codec.release(); ex.release()
-        return "tags(range,std,transfer)=$tags $res"
+        return "tags(range,std,transfer)=$tags rot=${if (fmt.containsKey(MediaFormat.KEY_ROTATION)) fmt.getInteger(MediaFormat.KEY_ROTATION) else 0} $res"
+    }
+
+    /** Encodes exact limited-range BT.709 grey (Y126 U128 V128) with MediaCodec, no GL at all. */
+    private fun rawGrey(): File {
+        val out = File(ctx.cacheDir, "diag-rawgrey.mp4"); out.delete()
+        val fmt = MediaFormat.createVideoFormat(MimeTypes.VIDEO_H264, 720, 1280).apply {
+            setInteger(MediaFormat.KEY_COLOR_FORMAT, android.media.MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible)
+            setInteger(MediaFormat.KEY_BIT_RATE, 8_000_000); setInteger(MediaFormat.KEY_FRAME_RATE, 30); setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
+            setInteger(MediaFormat.KEY_COLOR_RANGE, MediaFormat.COLOR_RANGE_LIMITED); setInteger(MediaFormat.KEY_COLOR_STANDARD, MediaFormat.COLOR_STANDARD_BT709)
+            setInteger(MediaFormat.KEY_COLOR_TRANSFER, MediaFormat.COLOR_TRANSFER_SDR_VIDEO)
+        }
+        val enc = MediaCodec.createEncoderByType(MimeTypes.VIDEO_H264); enc.configure(fmt, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE); enc.start()
+        val mux = android.media.MediaMuxer(out.path, android.media.MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+        var track = -1; var frame = 0; val info = MediaCodec.BufferInfo(); var done = false
+        val deadline = System.currentTimeMillis() + 30_000
+        while (!done && System.currentTimeMillis() < deadline) {
+            if (frame <= 30) { val i = enc.dequeueInputBuffer(10_000); if (i >= 0) {
+                if (frame == 30) enc.queueInputBuffer(i, 0, 0, frame * 33_333L, MediaCodec.BUFFER_FLAG_END_OF_STREAM) else {
+                    val img = enc.getInputImage(i)!!
+                    img.planes.forEachIndexed { k, pl -> val v = (if (k == 0) 126 else 128).toByte(); val w = if (k == 0) img.width else img.width / 2; val h = if (k == 0) img.height else img.height / 2
+                        for (y in 0 until h) for (x in 0 until w) pl.buffer.put(y * pl.rowStride + x * pl.pixelStride, v) }
+                    enc.queueInputBuffer(i, 0, img.width * img.height * 3 / 2, frame * 33_333L, 0)
+                }
+                frame++ } }
+            val o = enc.dequeueOutputBuffer(info, 10_000)
+            if (o == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) { track = mux.addTrack(enc.outputFormat); mux.start() }
+            else if (o >= 0) {
+                if (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG == 0 && info.size > 0 && track >= 0) mux.writeSampleData(track, enc.getOutputBuffer(o)!!, info)
+                if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) done = true
+                enc.releaseOutputBuffer(o, false)
+            }
+        }
+        enc.stop(); enc.release(); mux.stop(); mux.release()
+        return out
     }
 
     @Test fun stillColourPath() {
+        runCatching { val f = rawGrey(); log("raw-yuv-grey(Y126U128V128, no GL) rgb ${rgb(f)} | ${yuv(f)}") }.onFailure { log("raw-yuv-grey failed: $it") }
+
         log("input ${swatches.joinToString(" ") { "${(it shr 16) and 255},${(it shr 8) and 255},${it and 255}" }}; ideal BT.709 limited grey Y126 U128 V128")
         for ((name, orig, pres) in listOf(Triple("bare-default", false, false), Triple("bare-original", true, false), Triple("original+presentation", true, true))) {
             runCatching { val f = export(name, orig, pres); log("$name rgb ${rgb(f)} | ${yuv(f)}") }.onFailure { log("$name failed: $it") }

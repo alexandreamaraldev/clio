@@ -87,7 +87,7 @@ class Exporter(private val context: Context) {
                 try { withContext(Dispatchers.Main) { run(composition, out, onProgress) }; break }
                 catch (e: ExportException) {
                     if (!toneMap && hdrPlan != HdrPlan.DROP) throw e
-                    if (k == plans.lastIndex) throw IllegalStateException("Não foi possível exportar este vídeo HDR neste aparelho. Tente remover os filtros dos clipes.", e)
+                    if (k == plans.lastIndex) throw UserFacingExportError("Não foi possível exportar este vídeo HDR neste aparelho. Tente remover os filtros dos clipes.", e)
                     android.util.Log.w("Clio", "HDR tone-map ($plan) failed, trying ${plans[k + 1]}", e)
                 }
             }
@@ -109,7 +109,8 @@ class Exporter(private val context: Context) {
         // the GPU (API 29+); below that all grades are dropped for this export and [lastNotice] says so.
         val graded = Grades.byClip(snap.grades)
         val anyHdr = video.any { !MediaKind.isImage(context, it.source) && HdrProbe.cached(it.source) == true }
-        toneMap = anyHdr && graded.isNotEmpty() && hdrPlan != HdrPlan.DROP
+        // Any HDR clip: convert the whole export to SDR (matches the SDR preview), grades or not.
+        toneMap = anyHdr && hdrPlan != HdrPlan.DROP
         val dropGrades = anyHdr && graded.isNotEmpty() && !toneMap
         lastNotice = when {
             dropGrades -> "Vídeo HDR: os filtros foram ignorados nesta exportação (este aparelho não converte HDR para SDR)."
@@ -291,3 +292,6 @@ object MediaKind {
         runCatching { context.contentResolver.getType(Uri.parse(source)) }.getOrNull()?.startsWith("image/")
             ?: source.substringAfterLast('.').lowercase().let { it in setOf("jpg", "jpeg", "png", "webp", "heic") }
 }
+
+/** An export failure whose message is already a complete pt-BR sentence for the user (no cause chain). */
+class UserFacingExportError(message: String, cause: Throwable?) : Exception(message, cause)
