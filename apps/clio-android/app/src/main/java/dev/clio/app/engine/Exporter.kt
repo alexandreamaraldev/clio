@@ -1,0 +1,184 @@
+package dev.clio.app.engine
+
+import android.content.ContentValues
+import android.content.Context
+import android.graphics.Color
+import android.graphics.Typeface
+import android.net.Uri
+import android.os.Build
+import android.os.Environment
+import android.provider.MediaStore
+import android.text.SpannableString
+import android.text.Spanned
+import android.text.style.AbsoluteSizeSpan
+import android.text.style.BackgroundColorSpan
+import android.text.style.ForegroundColorSpan
+import android.text.style.StyleSpan
+import androidx.annotation.OptIn
+import androidx.media3.common.MediaItem
+import androidx.media3.common.MimeTypes
+import androidx.media3.common.util.UnstableApi
+import androidx.media3.effect.OverlayEffect
+import androidx.media3.effect.OverlaySettings
+import androidx.media3.effect.Presentation
+import androidx.media3.effect.TextOverlay
+import androidx.media3.transformer.Composition
+import androidx.media3.transformer.EditedMediaItem
+import androidx.media3.transformer.EditedMediaItemSequence
+import androidx.media3.transformer.Effects
+import androidx.media3.transformer.ExportException
+import androidx.media3.transformer.ExportResult
+import androidx.media3.transformer.ProgressHolder
+import androidx.media3.transformer.Transformer
+import com.google.common.collect.ImmutableList
+import dev.clio.app.ui.screens.CaptionStyle
+import kotlinx.coroutines.*
+import uniffi.clio_ffi.Snapshot
+import uniffi.clio_ffi.TrackKind
+import java.io.File
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
+
+data class ExportSpec(val label: String, val width: Int, val height: Int, val fps: Int)
+
+/**
+ * INTERIM exporter on Media3 Transformer (H.264/AAC MP4): concatenates the video track (clips
+ * trimmed by their in/out points), scales to the preset with fit (letterbox) or fill (crop), burns
+ * in captions and text overlays, mixes the music track, then saves to the gallery (MediaStore).
+ * The long-term path is the FilmCraft `render`/`export` crates through ffi-mobile.
+ */
+@OptIn(UnstableApi::class)
+class Exporter(private val context: Context) {
+
+    suspend fun export(snap: Snapshot, spec: ExportSpec, captionStyle: CaptionStyle, onProgress: (Float) -> Unit): Uri {
+        val out = File(context.cacheDir, "export-${System.currentTimeMillis()}.mp4")
+        val composition = buildComposition(snap, spec, captionStyle)
+        withContext(Dispatchers.Main) { run(composition, out, onProgress) }
+        return withContext(Dispatchers.IO) { publish(out, snap.summary.name) }
+    }
+
+    private fun buildComposition(snap: Snapshot, spec: ExportSpec, style: CaptionStyle): Composition {
+        val video = snap.tracks.firstOrNull { it.kind == TrackKind.VIDEO }?.clips.orEmpty()
+        require(video.isNotEmpty()) { "Adicione um vídeo antes de exportar" }
+        val texts = snap.tracks.filter { it.kind == TrackKind.TEXT }.flatMap { it.clips }
+            .map { Timed(it.startMs.toLong(), (it.startMs + it.durationMs).toLong(), it.name) }
+        val caps = snap.captions.map { Timed(it.startMs.toLong(), it.endMs.toLong(), it.text) }
+        val layout = if (snap.fill) Presentation.LAYOUT_SCALE_TO_FIT_WITH_CROP else Presentation.LAYOUT_SCALE_TO_FIT
+        val totalMs = snap.summary.durationMs.toLong()
+
+        val items = video.map { c ->
+            val isImage = MediaKind.isImage(context, c.source)
+            val mi = MediaItem.Builder().setUri(c.source).apply {
+                if (!isImage) setClippingConfiguration(MediaItem.ClippingConfiguration.Builder()
+                    .setStartPositionMs(c.inMs.toLong()).setEndPositionMs((c.inMs + c.durationMs).toLong()).build())
+                else setImageDurationMs(c.durationMs.toLong())
+            }.build()
+            val overlays = ImmutableList.of<androidx.media3.effect.TextureOverlay>(
+                TimedTextOverlay(c.startMs.toLong(), texts, spec.height, centered = true, style = CaptionStyle.Bold),
+                TimedTextOverlay(c.startMs.toLong(), caps, spec.height, centered = false, style = style),
+            )
+            EditedMediaItem.Builder(mi)
+                .apply { if (isImage) { setDurationUs(c.durationMs.toLong() * 1000); setFrameRate(spec.fps) } }
+                .setEffects(Effects(ImmutableList.of(), ImmutableList.of<androidx.media3.common.Effect>(
+                    Presentation.createForWidthAndHeight(spec.width, spec.height, layout),
+                    OverlayEffect(overlays),
+                )))
+                .build()
+        }
+        val seqs = mutableListOf(EditedMediaItemSequence(items))
+        snap.tracks.firstOrNull { it.kind == TrackKind.AUDIO }?.clips?.firstOrNull()?.let { m ->
+            val end = minOf(m.durationMs.toLong(), totalMs - m.startMs.toLong()).coerceAtLeast(1)
+            val mi = MediaItem.Builder().setUri(m.source).setClippingConfiguration(
+                MediaItem.ClippingConfiguration.Builder().setStartPositionMs(m.inMs.toLong()).setEndPositionMs(m.inMs.toLong() + end).build()).build()
+            seqs += EditedMediaItemSequence(ImmutableList.of(EditedMediaItem.Builder(mi).setRemoveVideo(true).build()))
+        }
+        return Composition.Builder(seqs).build()
+    }
+
+    private suspend fun run(composition: Composition, out: File, onProgress: (Float) -> Unit) = coroutineScope {
+        lateinit var transformer: Transformer
+        val poll = launch {
+            val h = ProgressHolder()
+            while (isActive) {
+                if (transformer.getProgress(h) == Transformer.PROGRESS_STATE_AVAILABLE) onProgress(h.progress / 100f)
+                delay(150)
+            }
+        }
+        try {
+            suspendCancellableCoroutine { cont ->
+                transformer = Transformer.Builder(context)
+                    .setVideoMimeType(MimeTypes.VIDEO_H264)
+                    .setAudioMimeType(MimeTypes.AUDIO_AAC)
+                    .addListener(object : Transformer.Listener {
+                        override fun onCompleted(composition: Composition, exportResult: ExportResult) { cont.resume(Unit) }
+                        override fun onError(composition: Composition, exportResult: ExportResult, exportException: ExportException) {
+                            cont.resumeWithException(exportException)
+                        }
+                    }).build()
+                transformer.start(composition, out.path)
+                cont.invokeOnCancellation { transformer.cancel() }
+            }
+        } finally { poll.cancel() }
+        onProgress(1f)
+    }
+
+    private fun publish(file: File, title: String): Uri {
+        val name = "Clio ${title.take(40).replace(Regex("[^\\p{L}\\p{N} _-]"), "")} ${System.currentTimeMillis() / 1000}.mp4"
+        try {
+            if (Build.VERSION.SDK_INT >= 29) {
+                val cv = ContentValues().apply {
+                    put(MediaStore.Video.Media.DISPLAY_NAME, name)
+                    put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
+                    put(MediaStore.Video.Media.RELATIVE_PATH, Environment.DIRECTORY_MOVIES + "/Clio")
+                    put(MediaStore.Video.Media.IS_PENDING, 1)
+                }
+                val r = context.contentResolver
+                val uri = r.insert(MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY), cv) ?: error("MediaStore insert failed")
+                r.openOutputStream(uri)!!.use { os -> file.inputStream().use { it.copyTo(os) } }
+                r.update(uri, ContentValues().apply { put(MediaStore.Video.Media.IS_PENDING, 0) }, null, null)
+                return uri
+            }
+            // API 26–28: app-specific Movies dir (no storage permission needed), shared via FileProvider.
+            val dir = File(context.getExternalFilesDir(Environment.DIRECTORY_MOVIES), "Clio").apply { mkdirs() }
+            val dst = File(dir, name); file.copyTo(dst, overwrite = true)
+            return androidx.core.content.FileProvider.getUriForFile(context, context.packageName + ".files", dst)
+        } finally { file.delete() }
+    }
+
+    private data class Timed(val startMs: Long, val endMs: Long, val text: String)
+
+    /** Shows whichever cue is active at the current frame; times are relative to the clip's place on the timeline. */
+    private class TimedTextOverlay(
+        private val clipStartMs: Long,
+        private val cues: List<Timed>,
+        private val frameHeight: Int,
+        private val centered: Boolean,
+        private val style: CaptionStyle,
+    ) : TextOverlay() {
+        private var basePts = Long.MIN_VALUE
+        private val empty = SpannableString(" ")
+
+        override fun getText(presentationTimeUs: Long): SpannableString {
+            if (basePts == Long.MIN_VALUE) basePts = presentationTimeUs
+            val t = clipStartMs + (presentationTimeUs - basePts) / 1000
+            val cue = cues.firstOrNull { t in it.startMs until it.endMs } ?: return empty
+            val text = if (style == CaptionStyle.Bold) cue.text.uppercase() else cue.text
+            return SpannableString(text).apply {
+                val all = Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+                setSpan(AbsoluteSizeSpan((frameHeight * if (centered) 0.045f else 0.032f).toInt()), 0, length, all)
+                setSpan(StyleSpan(if (style == CaptionStyle.Clean) Typeface.NORMAL else Typeface.BOLD), 0, length, all)
+                setSpan(ForegroundColorSpan(if (style == CaptionStyle.Karaoke) 0xFFFFD27A.toInt() else Color.WHITE), 0, length, all)
+                if (style == CaptionStyle.Box) setSpan(BackgroundColorSpan(0x99000000.toInt()), 0, length, all)
+            }
+        }
+
+        override fun getOverlaySettings(presentationTimeUs: Long): OverlaySettings =
+            OverlaySettings.Builder().setBackgroundFrameAnchor(0f, if (centered) 0f else -0.72f).build()
+    }
+}
+
+object MediaKind {
+    fun isImage(context: Context, source: String): Boolean =
+        runCatching { context.contentResolver.getType(Uri.parse(source)) }.getOrNull()?.startsWith("image/")
+            ?: source.substringAfterLast('.').lowercase().let { it in setOf("jpg", "jpeg", "png", "webp", "heic") }
+}

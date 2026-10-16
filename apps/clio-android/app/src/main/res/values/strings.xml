@@ -1,0 +1,11 @@
+<resources>
+    <string name="app_name">Clio</string>
+    <string name="action_export">Exportar</string>
+    <string name="action_back">Voltar</string>
+    <string name="action_add_video">Adicionar vídeo</string>
+    <string name="action_undo">Desfazer</string>
+    <string name="action_redo">Refazer</string>
+    <string name="action_delete">Apagar</string>
+    <string name="saved_auto">Salvo automaticamente</string>
+    <string name="saving">Salvando…</string>
+</resources>

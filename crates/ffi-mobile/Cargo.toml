@@ -1,0 +1,26 @@
+[package]
+name = "filmcraft-ffi-mobile"
+description = "Mobile (Android/iOS) bindings for the FilmCraft engine via UniFFI, used by the Clio app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+# Note: no `[lints] workspace = true` — UniFFI scaffolding needs unsafe code at the FFI boundary.
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "clio_ffi"
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "uniffi-bindgen.rs"
+
+[dependencies]
+filmcraft-project = { workspace = true }
+filmcraft-captions = { workspace = true }
+filmcraft-time = { workspace = true }
+filmcraft-speech = { workspace = true, features = ["whisper"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+uniffi = { version = "0.28", features = ["cli"] }
