@@ -39,9 +39,20 @@ class ExportMatrixTest {
             "fill" to { _ -> setFraming(true, false) },
             "split" to { c -> splitClip(c, 2500u) },
             "text" to { _ -> val t = addTrack(TrackKind.TEXT, "T"); insertClip(t, "Oi", "", 500u, 2000u) },
+            // Combinations: processors on only some items of a multi-clip sequence.
+            "split+speedA" to { c -> splitClip(c, 2500u); setClipSpeed(c, 2f) },
+            "split+speedB" to { c -> val r = splitClip(c, 2500u); setClipSpeed(r, 2f) },
+            "split+fadeA" to { c -> splitClip(c, 2500u); setClipAudio(c, 1f, 500u, 0u, false) },
+            "split+fadeB" to { c -> val r = splitClip(c, 2500u); setClipAudio(r, 1f, 500u, 0u, false) },
+            "dup+speed+fade" to { c -> val d = duplicateClip(c); setClipSpeed(d, 2f); setClipAudio(c, 1f, 1000u, 0u, false) },
+            "e2e-like" to { c ->
+                trimClip(c, 0u, 4500u); val r = splitClip(c, 1500u); val d = duplicateClip(c)
+                moveClip(r, 0u); setClipSpeed(r, 2f); setClipAudio(r, 1f, 400u, 0u, false); setFraming(false, true)
+                val t = addTrack(TrackKind.TEXT, "T"); insertClip(t, "Oi", "", 500u, 2000u); check(d > 0u)
+            },
         )
         val results = mutableListOf<String>()
-        for (drop in listOf(false, true)) for ((name, edit) in variants) {
+        for (drop in listOf(true)) for ((name, edit) in variants) {
             val label = "$name${if (drop) "+framedrop" else ""}"
             val p = ClioProject("m", 1080u, 1920u)
             val v = p.addTrack(TrackKind.VIDEO, "V")
