@@ -12,10 +12,26 @@ class TextHandlesTest {
         assertEquals(1f, s2, 0f); assertEquals(1.5f, l2, 1e-3f)
     }
 
-    @Test fun noUiClampingTheEngineOwnsLimits() {
-        // Past zero / past the other edge is passed through; retime_text/retime_caption clamp it.
-        assertEquals(-2.5f, TextHandles.trim(0.5f, 1f, true, -3f).first, 1e-3f)
-        assertEquals(-3f, TextHandles.move(1f, 2f, -4f), 1e-3f)
+    @Test fun dragPastZeroKeepsTiming() {
+        // Move: start stops at 0, length kept.
+        assertEquals(0f, TextHandles.move(1f, 2f, -4f), 0f)
+        // Left trim: start stops at 0, end kept.
+        val (s, l) = TextHandles.trim(0.5f, 1f, true, -3f)
+        assertEquals(0f, s, 0f); assertEquals(1.5f, l, 1e-4f)
+        // Controller guard: an unclamped window is shifted, never collapsed.
+        assertEquals(0L to 2000L, dev.clio.app.engine.TextRetime.window(-3000, -1000))
+        assertEquals(500L to 1500L, dev.clio.app.engine.TextRetime.window(500, 1500))
+    }
+
+    @Test fun snapsBackToOwnEdges() {
+        val a = TextHandles.ownEdges(1.234f, 1f)
+        assertEquals(1.234f, TextHandles.move(1.234f, 1f, 0.05f, a), 0f)
+        assertEquals(2.234f, TextHandles.trim(1.234f, 1f, false, -0.04f, a).let { it.first + it.second }, 1e-4f)
+    }
+
+    @Test fun gridFollowsFps() {
+        TextHandles.fps = 24
+        try { assertEquals(1f / 24 * 25, TextHandles.snapTo(1.04f, emptyList()), 1e-4f) } finally { TextHandles.fps = 30 }
     }
 
     @Test fun magnetsToPlayheadAndEdges() {
