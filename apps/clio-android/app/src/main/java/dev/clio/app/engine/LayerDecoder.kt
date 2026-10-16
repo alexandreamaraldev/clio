@@ -82,10 +82,14 @@ internal fun layerOnCanvas(cx: Float, cy: Float, wPx: Float, hPx: Float, deg: Fl
  */
 internal object LayerMemory {
     const val BUDGET_BYTES = 48L * 1024 * 1024
+    /** Video: RGB_565 bitmap (2) + ARGB pixels and the X/Y source maps (3 IntArrays, 12). */
+    const val VIDEO_BPP = 2 + 12
+    /** Images: one ARGB bitmap. */
+    const val IMAGE_BPP = 4
 
     /** Scale factor (<= 1) applied to every layer so that their summed bytes fit the budget. */
     fun fit(sizes: List<Pair<Int, Int>>, bytesPerPixel: List<Int>): Float {
-        val total = sizes.zip(bytesPerPixel).sumOf { (s, b) -> s.first.toLong() * s.second * (b + 4) } // +4: ARGB scratch row-equivalent
+        val total = sizes.zip(bytesPerPixel).sumOf { (s, b) -> s.first.toLong() * s.second * b }
         if (total <= BUDGET_BYTES || total == 0L) return 1f
         return kotlin.math.sqrt(BUDGET_BYTES.toDouble() / total).toFloat().coerceIn(0.05f, 1f)
     }

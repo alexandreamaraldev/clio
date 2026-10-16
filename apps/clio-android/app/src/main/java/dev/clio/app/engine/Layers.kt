@@ -140,18 +140,55 @@ object Layers {
         private var failed = false
         /** Frames requested by the exporter (one per output frame while visible). */
         var requests = 0; private set
-        val decodes: Int get() = decoder?.decoded ?: 0
+        val decodes: Int get() = (decoder?.decoded ?: 0) + endDecodes
 
-        val latest: Bitmap? get() = still ?: decoder?.bitmap
+        val latest: Bitmap? get() = still ?: decoder?.bitmap ?: endFrame ?: fallbackFrame
 
         @Synchronized fun frame(localMs: Long): Bitmap {
             requests++
             if (isImage) return still ?: decodeStill().also { still = it }
-            if (failed) return blank
-            val d = decoder ?: runCatching { SequentialVideoDecoder(context, Uri.parse(c.source), targetW, targetH) }
-                .onFailure { failed = true }.getOrNull()?.also { decoder = it } ?: return blank
             val srcUs = (c.inMs.toLong() + Mix.spanMs(localMs.coerceAtLeast(0), c.speed)) * 1000
-            return runCatching { d.frameAt(srcUs) }.getOrElse { d.bitmap }
+            if (ended) return endFrame ?: fallbackFrame ?: blank
+            if (!failed) {
+                val d = decoder ?: runCatching { SequentialVideoDecoder(context, Uri.parse(c.source), targetW, targetH) }
+                    .onFailure { failed = true; android.util.Log.w("Clio", "layer decoder unavailable, using retriever", it) }
+                    .getOrNull()?.also { decoder = it }
+                if (d != null) return runCatching { d.frameAt(srcUs) }.getOrElse { d.bitmap }
+            }
+            return fallback(srcUs)
+        }
+
+        /** Hardware decoder limit hit: slow but correct per-frame MediaMetadataRetriever path. */
+        private var retriever: android.media.MediaMetadataRetriever? = null
+        private var fallbackFrame: Bitmap? = null
+        /** Set when no frame could be read at all; the exporter turns it into a failed export. */
+        var error: String? = null; private set
+
+        private fun fallback(srcUs: Long): Bitmap {
+            val r = retriever ?: runCatching { android.media.MediaMetadataRetriever().apply { setDataSource(context, Uri.parse(c.source)) } }
+                .getOrNull()?.also { retriever = it }
+            val f = r?.let { m -> runCatching {
+                if (android.os.Build.VERSION.SDK_INT >= 27) m.getScaledFrameAtTime(srcUs, android.media.MediaMetadataRetriever.OPTION_CLOSEST, targetW, targetH)
+                else m.getFrameAtTime(srcUs, android.media.MediaMetadataRetriever.OPTION_CLOSEST)?.let { b -> Bitmap.createScaledBitmap(b, targetW, targetH, true).also { s -> if (s !== b) b.recycle() } }
+            }.getOrNull() }
+            if (f == null) {
+                if (fallbackFrame == null) error = "Não foi possível ler o vídeo de uma camada. Feche outros apps e tente de novo."
+                return fallbackFrame ?: blank
+            }
+            fallbackFrame?.recycle(); fallbackFrame = f
+            return f
+        }
+
+        private var ended = false
+        private var endFrame: Bitmap? = null
+        private var endDecodes = 0
+        /** The layer is past its end on the timeline (export runs forward): free the decoder now. */
+        @Synchronized fun end() {
+            if (ended || isImage) return
+            ended = true
+            // Codec, extractor and the int arrays go; only the last bitmap is kept for the hidden overlay.
+            endFrame = decoder?.bitmap; endDecodes = decoder?.decoded ?: 0; decoder?.close(); decoder = null
+            retriever?.release(); retriever = null
         }
 
         private fun decodeStill(): Bitmap = runCatching {
@@ -165,7 +202,7 @@ object Layers {
 
         private fun <T> read(f: (java.io.InputStream) -> T): T? = context.contentResolver.openInputStream(Uri.parse(c.source))?.use(f)
 
-        @Synchronized override fun close() { decoder?.close(); decoder = null }
+        @Synchronized override fun close() { decoder?.close(); decoder = null; retriever?.release(); retriever = null }
 
         companion object {
             /** Builds one source per layer, sized together under [LayerMemory.BUDGET_BYTES]. */
@@ -177,7 +214,7 @@ object Layers {
                     Triple(c, img, aspect)
                 }
                 val sizes = info.map { (c, _, a) -> val w = (canvasW * c.transform.scale.coerceIn(LayerLimits.scaleRange)).toInt().coerceIn(2, 4096); w to (w * a).toInt().coerceAtLeast(2) }
-                val scale = LayerMemory.fit(sizes, info.map { if (it.second) 4 else 2 })
+                val scale = LayerMemory.fit(sizes, info.map { if (it.second) LayerMemory.IMAGE_BPP else LayerMemory.VIDEO_BPP })
                 return info.associate { (c, img, a) -> c.id to FrameSource(context, c, img, canvasW, a, scale) }
             }
         }
@@ -200,6 +237,7 @@ object Layers {
         override fun getBitmap(presentationTimeUs: Long): Bitmap {
             val t = itemStartMs + clock.ms(presentationTimeUs) - c.startMs.toLong()
             visible = t >= 0 && t < c.durationMs.toLong()
+            if (t >= c.durationMs.toLong()) src.end()
             return if (visible) src.frame(t) else src.latest ?: src.frame(0)
         }
 

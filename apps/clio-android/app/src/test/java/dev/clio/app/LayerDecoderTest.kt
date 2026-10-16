@@ -63,11 +63,11 @@ class LayerDecoderTest {
     }
 
     @Test fun memoryBudgetScalesAllLayers() {
-        assertEquals(1f, LayerMemory.fit(listOf(432 to 768), listOf(2)), 0f)
+        assertEquals(1f, LayerMemory.fit(listOf(432 to 768), listOf(LayerMemory.VIDEO_BPP)), 0f)
         val many = List(6) { 1920 to 1080 }
-        val k = LayerMemory.fit(many, List(6) { 2 })
+        val k = LayerMemory.fit(many, List(6) { LayerMemory.VIDEO_BPP })
         assertTrue(k < 1f)
-        val bytes = many.sumOf { (w, h) -> (w * k).toLong() * (h * k).toLong() * 6 }
+        val bytes = many.sumOf { (w, h) -> (w * k).toLong() * (h * k).toLong() * LayerMemory.VIDEO_BPP }
         assertTrue("fits budget: $bytes", bytes <= LayerMemory.BUDGET_BYTES * 1.02)
     }
 }
