@@ -95,7 +95,6 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) { applyItemParams() }
             override fun onPlaybackStateChanged(state: Int) { if (state == Player.STATE_ENDED) { pause(); seekTimeline(0f) } }
         })
-        setVideoEffects(previewLook.effects)
     }
     /** Music preview runs on its own player, slaved to the timeline. */
     val musicPlayer: ExoPlayer = ExoPlayer.Builder(app).build()
@@ -160,6 +159,7 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
         val clips = s.tracks.firstOrNull { it.id == videoTrack }?.clips.orEmpty()
         clipStarts = LongArray(clips.size) { clips[it].startMs.toLong() }
         videoClips = clips
+        syncPreviewEffects()
         val app = getApplication<Application>()
         player.setMediaItems(clips.map { c ->
             MediaItem.Builder().setUri(c.source).setMediaId(c.id.toString()).apply {
@@ -201,8 +201,23 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
 
     private fun updateLook(idx: Int, localMs: Long) {
         val c = videoClips.getOrNull(idx) ?: return
+        // No FFI call (and no GL effects installed) unless this clip has a transition.
+        if (!Layers.hasTransition(videoClips, idx)) { previewLook.reset(); return }
         previewLook.look = Layers.look(c, Layers.incoming(videoClips, idx), localMs)
     }
+
+    /** Installs the transition GL effects only while the main track has any transition. */
+    private var effectsOn = false
+    private fun syncPreviewEffects() {
+        val want = videoClips.indices.any { Layers.hasTransition(videoClips, it) }
+        if (want == effectsOn) return
+        effectsOn = want
+        previewLook.reset()
+        player.setVideoEffects(if (want) previewLook.effects else emptyList())
+    }
+
+    /** The media picker was dismissed without a choice. */
+    fun pickCancelled() { pickForLayer = false }
 
     private fun syncMusic() {
         val m = musicClip ?: return
@@ -316,6 +331,7 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
 
     private fun refreshClipCache(s: Snapshot) {
         videoClips = s.tracks.firstOrNull { it.id == videoTrack }?.clips.orEmpty()
+        syncPreviewEffects()
         musicClip = s.tracks.firstOrNull { it.kind == TrackKind.AUDIO }?.clips?.firstOrNull()
         applyItemParams()
     }

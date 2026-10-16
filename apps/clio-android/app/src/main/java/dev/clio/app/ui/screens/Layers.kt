@@ -53,29 +53,67 @@ data class UiLayer(
     val inMs: Long, val speed: Float, val isImage: Boolean, val row: Int, val transform: UiTransform,
 )
 
-enum class TransitionStyle(val label: String) { None("Nenhuma"), Fade("Esmaecer"), Slide("Deslizar"), Zoom("Zoom") }
+enum class TransitionStyle(val label: String) { None("Nenhuma"), Fade("Escurecer"), Slide("Deslizar"), Zoom("Zoom") }
 
 /** The cut after main-track clip [clipId]. */
 @Immutable
 data class UiCut(val clipId: Long, val index: Int, val atS: Float, val style: TransitionStyle, val durS: Float, val maxS: Float)
 
+/** Locale-aware number formatting for panel readouts (pt-BR: "0,5", "45%"). */
+internal object PtBr {
+    private val locale = java.util.Locale.forLanguageTag("pt-BR")
+    fun pct(v: Float): String = java.text.NumberFormat.getPercentInstance(locale).apply { maximumFractionDigits = 0 }.format(v.toDouble())
+    fun dec(v: Float, digits: Int = 1): String = java.text.NumberFormat.getNumberInstance(locale).apply {
+        minimumFractionDigits = digits; maximumFractionDigits = digits }.format(v.toDouble())
+}
+
+/** How far ahead a layer is composed (players created, first frame ready) before it starts. */
+internal const val LAYER_PRELOAD_MS = 500L
+
+/** Layers whose [start-preload, end) window contains [nowMs], bottom row first. */
+internal fun layersInWindow(layers: List<UiLayer>, nowMs: Long, preloadMs: Long = LAYER_PRELOAD_MS): List<UiLayer> =
+    layers.filter { nowMs >= it.startMs - preloadMs && nowMs < it.endMs }.sortedBy { it.row }
+
 /**
- * Live overlay layers over the player. Video layers each get a small muted ExoPlayer kept within
- * ~150 ms of the timeline; images are decoded once. The selected layer can be dragged, pinched
- * and twisted directly on the canvas.
+ * Screen-space drag → canvas delta for a layer rotated [rotationDeg] (counter-clockwise, as in the
+ * engine). Gestures on a rotated graphicsLayer arrive in the layer's local axes, so rotate them
+ * back to screen axes, then normalise (+y up).
+ */
+internal fun panToCanvas(localX: Float, localY: Float, rotationDeg: Float, w: Float, h: Float): Pair<Float, Float> {
+    // Compose draws rotationZ clockwise; the layer is drawn with rotationZ = -rotation.
+    val r = Math.toRadians(-rotationDeg.toDouble())
+    val sx = (localX * kotlin.math.cos(r) - localY * kotlin.math.sin(r)).toFloat()
+    val sy = (localX * kotlin.math.sin(r) + localY * kotlin.math.cos(r)).toFloat()
+    return (sx / (w / 2)) to (-sy / (h / 2))
+}
+
+/**
+ * Live overlay layers over the player, mapped to the canvas rectangle (letterboxed inside the
+ * preview box when its aspect differs). Video layers each get a small muted ExoPlayer, created
+ * [LAYER_PRELOAD_MS] early so they don't pop in; images are decoded once. The playhead is only
+ * read in snapshot flows and the draw phase, never in composition. The selected layer can be
+ * dragged, resized with two fingers and rotated directly on the canvas.
  */
 @Composable
 fun LayerStack(
     layers: List<UiLayer>, playhead: () -> Float, playing: Boolean, selected: Long?,
     onSelect: (Long) -> Unit, onTransform: (Long, UiTransform) -> Unit, modifier: Modifier = Modifier,
+    canvasW: Int = 0, canvasH: Int = 0,
 ) {
-    BoxWithConstraints(modifier.fillMaxSize()) {
-        val w = constraints.maxWidth.toFloat()
-        val h = constraints.maxHeight.toFloat()
-        // Recompose only when the active set changes, not every frame.
-        val nowMs by remember { derivedStateOf { (playhead() * 1000).toLong() / 100 * 100 } }
-        val active = layers.filter { nowMs in it.startMs until it.endMs }.sortedBy { it.row }
-        active.forEach { l -> key(l.id) { LayerView(l, w, h, playhead, playing, l.id == selected, onSelect, onTransform) } }
+    if (layers.isEmpty()) return
+    var window by remember { mutableStateOf(emptyList<UiLayer>()) }
+    val cur by rememberUpdatedState(layers)
+    LaunchedEffect(Unit) {
+        snapshotFlow { layersInWindow(cur, (playhead() * 1000).toLong()) }.collect { window = it }
+    }
+    BoxWithConstraints(modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        val bw = constraints.maxWidth.toFloat(); val bh = constraints.maxHeight.toFloat()
+        val aspect = if (canvasW > 0 && canvasH > 0) canvasW.toFloat() / canvasH else bw / bh.coerceAtLeast(1f)
+        val (w, h) = if (bw / bh.coerceAtLeast(1f) > aspect) (bh * aspect) to bh else bw to (bw / aspect)
+        val density = androidx.compose.ui.platform.LocalDensity.current
+        Box(Modifier.size(with(density) { w.toDp() }, with(density) { h.toDp() })) {
+            window.forEach { l -> key(l.id) { LayerView(l, w, h, playhead, playing, l.id == selected, onSelect, onTransform) } }
+        }
     }
 }
 
@@ -86,11 +124,13 @@ private fun LayerView(
 ) {
     var t by remember(l.id, l.transform) { mutableStateOf(l.transform) }
     val state = rememberTransformableState { zoom, pan, rot ->
+        val (dx, dy) = panToCanvas(pan.x, pan.y, t.rotation, w, h)
         t = t.copy(
             scale = (t.scale * zoom).coerceIn(LayerLimits.scaleRange),
-            x = (t.x + pan.x / (w / 2)).coerceIn(LayerLimits.offsetRange),
-            y = (t.y - pan.y / (h / 2)).coerceIn(LayerLimits.offsetRange),
-            rotation = t.rotation + rot,
+            x = (t.x + dx).coerceIn(LayerLimits.offsetRange),
+            y = (t.y + dy).coerceIn(LayerLimits.offsetRange),
+            // Gesture rotation is clockwise-positive on screen; layer rotation is counter-clockwise.
+            rotation = t.rotation - rot,
         )
     }
     LaunchedEffect(state.isTransformInProgress) { if (!state.isTransformInProgress && t != l.transform) onTransform(l.id, t) }
@@ -104,7 +144,10 @@ private fun LayerView(
             .graphicsLayer {
                 translationX = w / 2 + t.x * w / 2 - lw / 2
                 translationY = h / 2 - t.y * h / 2 - lh / 2
-                rotationZ = -t.rotation; alpha = t.opacity; scaleX = pop; scaleY = pop
+                // Draw phase: hidden while preloading (before its start), no recomposition.
+                val now = (playhead() * 1000).toLong()
+                alpha = if (now >= l.startMs) t.opacity else 0f
+                rotationZ = -t.rotation; scaleX = pop; scaleY = pop
             }
             .size(with(density) { lw.toDp() }, with(density) { lh.toDp() })
             .then(if (selected) Modifier.border(1.5.dp, ClioColors.Clay, ClioShapes.sm) else Modifier)
@@ -148,16 +191,20 @@ private fun LayerVideo(l: UiLayer, playhead: () -> Float, playing: Boolean, onAs
         }
     }
     DisposableEffect(player) { onDispose { player.release() } }
+    val want = { l.inMs + ((playhead() * 1000 - l.startMs) * l.speed).toLong().coerceAtLeast(0) }
+    val inside = { playhead() * 1000 >= l.startMs }
     LaunchedEffect(player, playing, l.startMs, l.inMs) {
-        while (true) {
-            val want = l.inMs + ((playhead() * 1000 - l.startMs) * l.speed).toLong().coerceAtLeast(0)
-            if (abs(player.currentPosition - want) > 150 || !playing) player.seekTo(want)
-            player.playWhenReady = playing
-            if (!playing) break
-            kotlinx.coroutines.delay(250)
+        if (playing) while (true) {
+            // Preloaded but not started yet: hold the first frame.
+            if (!inside()) { player.playWhenReady = false; if (player.currentPosition != l.inMs) player.seekTo(l.inMs) }
+            else { if (abs(player.currentPosition - want()) > 150) player.seekTo(want()); player.playWhenReady = true }
+            kotlinx.coroutines.delay(100)
+        } else {
+            player.playWhenReady = false
+            // Scrubbing: follow the playhead without reading it in composition.
+            snapshotFlow { want() }.collect { player.seekTo(it) }
         }
     }
-    if (!playing) LaunchedEffect(playhead()) { player.seekTo(l.inMs + ((playhead() * 1000 - l.startMs) * l.speed).toLong().coerceAtLeast(0)) }
     AndroidView({ TextureView(it).also(player::setVideoTextureView) }, Modifier.fillMaxSize())
 }
 
@@ -182,7 +229,7 @@ fun LayersPanel(layer: UiLayer?, onAdd: () -> Unit, onTransform: (Long, UiTransf
         }
         if (layer == null) {
             Box(Modifier.fillMaxWidth().height(150.dp), contentAlignment = Alignment.Center) {
-                Text("Adicione um vídeo ou imagem por cima do clipe principal.\nToque numa camada para editar; arraste, pince e gire no vídeo.",
+                Text("Adicione um vídeo ou imagem por cima do clipe principal.\nToque numa camada para editar; arraste, use dois dedos para redimensionar e girar.",
                     style = MaterialTheme.typography.bodyMedium, color = ClioColors.TextTertiary, textAlign = androidx.compose.ui.text.style.TextAlign.Center)
             }
             return@Column
@@ -191,15 +238,15 @@ fun LayersPanel(layer: UiLayer?, onAdd: () -> Unit, onTransform: (Long, UiTransf
         val done = { onTransform(layer.id, t) }
         val haptics = rememberHaptics()
         Spacer(Modifier.height(Space.xs))
-        LayerSlider("Tamanho", "${(t.scale * 100).roundToInt()}%", t.scale, LayerLimits.scaleRange, { t = t.copy(scale = it) }, done)
+        LayerSlider("Tamanho", PtBr.pct(t.scale), t.scale, LayerLimits.scaleRange, { t = t.copy(scale = it) }, done)
         LayerSlider("Rotação", "${t.rotation.roundToInt()}°", t.rotation, -180f..180f, {
             val snapped = if (abs(it) < 3f) 0f else it
             if (snapped == 0f && t.rotation != 0f) haptics.tick()
             t = t.copy(rotation = snapped)
         }, done)
-        LayerSlider("Opacidade", "${(t.opacity * 100).roundToInt()}%", t.opacity, 0f..1f, { t = t.copy(opacity = it) }, done)
-        LayerSlider("Horizontal", "%.2f".format(t.x).replace('.', ','), t.x, LayerLimits.offsetRange, { t = t.copy(x = if (abs(it) < 0.03f) 0f else it) }, done)
-        LayerSlider("Vertical", "%.2f".format(t.y).replace('.', ','), t.y, LayerLimits.offsetRange, { t = t.copy(y = if (abs(it) < 0.03f) 0f else it) }, done)
+        LayerSlider("Opacidade", PtBr.pct(t.opacity), t.opacity, 0f..1f, { t = t.copy(opacity = it) }, done)
+        LayerSlider("Horizontal", PtBr.pct(t.x), t.x, LayerLimits.offsetRange, { t = t.copy(x = if (abs(it) < 0.03f) 0f else it) }, done)
+        LayerSlider("Vertical", PtBr.pct(t.y), t.y, LayerLimits.offsetRange, { t = t.copy(y = if (abs(it) < 0.03f) 0f else it) }, done)
     }
 }
 
@@ -209,7 +256,7 @@ fun TransitionPanel(cuts: List<UiCut>, cut: UiCut?, onPick: (UiCut) -> Unit, onS
     Column(Modifier.fillMaxWidth().height(220.dp).padding(horizontal = Space.md)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("Transição", style = MaterialTheme.typography.titleMedium, color = ClioColors.TextPrimary, modifier = Modifier.weight(1f))
-            Text(cut?.let { "Corte ${it.index + 1} · ${"%.1f".format(it.atS).replace('.', ',')} s" } ?: "", style = MaterialTheme.typography.labelMedium, color = ClioColors.TextTertiary)
+            Text(cut?.let { "Corte ${it.index + 1} · ${PtBr.dec(it.atS)} s" } ?: "", style = MaterialTheme.typography.labelMedium, color = ClioColors.TextTertiary)
         }
         if (cut == null) {
             Box(Modifier.fillMaxWidth().height(150.dp), contentAlignment = Alignment.Center) {
@@ -233,7 +280,7 @@ fun TransitionPanel(cuts: List<UiCut>, cut: UiCut?, onPick: (UiCut) -> Unit, onS
         if (cut.style != TransitionStyle.None) {
             var d by remember(cut.clipId, cut.durS) { mutableFloatStateOf(cut.durS) }
             Spacer(Modifier.height(Space.sm))
-            LayerSlider("Duração", "${"%.1f".format(d).replace('.', ',')} s", d, (LayerLimits.MIN_TRANSITION_MS / 1000f)..cut.maxS.coerceAtLeast(LayerLimits.MIN_TRANSITION_MS / 1000f + 0.1f), { d = it }, { onSet(cut.clipId, cut.style, d) })
+            LayerSlider("Duração", "${PtBr.dec(d)} s", d, (LayerLimits.MIN_TRANSITION_MS / 1000f)..cut.maxS.coerceAtLeast(LayerLimits.MIN_TRANSITION_MS / 1000f + 0.1f), { d = it }, { onSet(cut.clipId, cut.style, d) })
         }
     }
 }

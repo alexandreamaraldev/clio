@@ -59,6 +59,7 @@ data class ExportSpec(val label: String, val width: Int, val height: Int, val fp
  */
 @OptIn(UnstableApi::class)
 class Exporter(private val context: Context) {
+    private var openSources: List<Layers.FrameSource> = emptyList()
     /** Diagnostics toggle used by the device QA export matrix. */
     internal var frameDrop = true
 
@@ -69,8 +70,10 @@ class Exporter(private val context: Context) {
 
     suspend fun export(snap: Snapshot, spec: ExportSpec, captionStyle: CaptionStyle, onProgress: (Float) -> Unit): Uri {
         val out = File(context.cacheDir, "export-${System.currentTimeMillis()}.mp4")
-        val composition = buildComposition(snap, spec, captionStyle)
-        withContext(Dispatchers.Main) { run(composition, out, onProgress) }
+        try {
+            val composition = buildComposition(snap, spec, captionStyle)
+            withContext(Dispatchers.Main) { run(composition, out, onProgress) }
+        } finally { openSources.forEach { it.close() }; openSources = emptyList() }
         return withContext(Dispatchers.IO) { publish(out, snap.summary.name) }
     }
 
@@ -83,7 +86,10 @@ class Exporter(private val context: Context) {
         val totalMs = snap.summary.durationMs.toLong()
         val blur = snap.blurBg && !snap.fill
 
+        // One frame source per layer, shared by every main item it overlaps (closed after export).
         val layers = Layers.overlayClips(snap)
+        val sources = layers.associate { it.id to Layers.FrameSource(context, it, MediaKind.isImage(context, it.source), spec.width) }
+        openSources = sources.values.toList()
         val items = video.mapIndexed { index, c ->
             val isImage = MediaKind.isImage(context, c.source)
             val speed = if (isImage) 1f else c.speed
@@ -94,7 +100,7 @@ class Exporter(private val context: Context) {
             }.build()
             // Overlay/PIP layers that overlap this item (bottom row first); drawn after the blur backdrop, before text.
             val layerOverlays = layers.filter { it.startMs < c.startMs + c.durationMs && it.startMs + it.durationMs > c.startMs }
-                .map { Layers.LayerOverlay(context, it, c.startMs.toLong(), spec.width, spec.height, MediaKind.isImage(context, it.source), spec.fps) }
+                .map { Layers.LayerOverlay(sources.getValue(it.id), it, c.startMs.toLong(), spec.width, spec.height) }
             val incoming = Layers.incoming(video, index)
             val video = mutableListOf<androidx.media3.common.Effect>()
             if (speed != 1f) video += SpeedChangeEffect(speed)

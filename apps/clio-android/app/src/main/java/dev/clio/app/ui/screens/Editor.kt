@@ -178,7 +178,8 @@ fun EditorScreen(
             ) {
                 if (ui.blurBg && !ui.fill) BlurBackdrop(ui.tracks.firstOrNull { it.kind == "video" }?.clips.orEmpty(), playhead)
                 preview(ui.fill)
-                LayerStack(ui.layers, playhead, ui.playing, selectedClip, { selectedClip = it; selectedTool = TOOL_LAYERS }, actions::setLayerTransform)
+                LayerStack(ui.layers, playhead, ui.playing, selectedClip, { selectedClip = it; selectedTool = TOOL_LAYERS }, actions::setLayerTransform,
+                    canvasW = ui.canvasW, canvasH = ui.canvasH)
                 TextLayer(ui.texts, playhead, Modifier.align(Alignment.Center).padding(Space.md))
                 if (ui.hasMedia) Text(when { ui.fill -> "Preencher"; ui.blurBg -> "Desfoque"; else -> "Ajustar" }, style = MaterialTheme.typography.labelSmall, color = ClioColors.OnMedia,
                     modifier = Modifier.align(Alignment.TopEnd).padding(10.dp).pressable(onClick = actions::toggleFill)

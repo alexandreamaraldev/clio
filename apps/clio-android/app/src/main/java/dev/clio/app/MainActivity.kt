@@ -114,7 +114,7 @@ private fun EditorRoute(draftId: String, isNew: Boolean, initialTool: Int, impor
     })
     val ctx = androidx.compose.ui.platform.LocalContext.current
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(20)) { uris ->
-        if (uris.isNotEmpty()) vm.addMedia(uris)
+        if (uris.isNotEmpty()) vm.addMedia(uris) else vm.pickCancelled()
     }
     val music = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> if (uri != null) vm.addMusic(uri) }
     val back by rememberUpdatedState(onBack)
