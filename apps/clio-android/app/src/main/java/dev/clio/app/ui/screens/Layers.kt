@@ -196,7 +196,7 @@ private fun LayerVideo(l: UiLayer, playhead: () -> Float, playing: Boolean, onAs
     LaunchedEffect(player, playing, l.startMs, l.inMs) {
         if (playing) while (true) {
             // Preloaded but not started yet: hold the first frame.
-            if (!inside()) { player.playWhenReady = false; if (player.currentPosition != l.inMs) player.seekTo(l.inMs) }
+            if (!inside()) { player.playWhenReady = false; if (abs(player.currentPosition - l.inMs) > 40) player.seekTo(l.inMs) }
             else { if (abs(player.currentPosition - want()) > 150) player.seekTo(want()); player.playWhenReady = true }
             kotlinx.coroutines.delay(100)
         } else {

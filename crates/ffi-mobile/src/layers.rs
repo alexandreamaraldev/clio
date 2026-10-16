@@ -106,11 +106,12 @@ pub fn clip_look(clip: &Clip, incoming: Transition, local_ms: u64) -> FrameLook 
         match tr.kind {
             TransitionKind::Fade => brightness *= 1.0 - k,
             TransitionKind::Slide => t.x += if outgoing { -k } else { k },
-            TransitionKind::Zoom => t.scale *= if outgoing { 1.0 + 0.6 * k } else { 1.0 + 0.6 * k },
+            // Both sides punch in towards the cut (outgoing zooms in, incoming settles from the zoom).
+            TransitionKind::Zoom => {
+                t.scale *= 1.0 + 0.6 * k;
+                brightness *= 1.0 - 0.3 * k;
+            }
             TransitionKind::None => {}
-        }
-        if tr.kind == TransitionKind::Zoom {
-            brightness *= 1.0 - 0.3 * k;
         }
     };
     apply(incoming, local_ms, false);
@@ -142,7 +143,7 @@ impl State {
     }
 
     fn overlay_track_free(&self, ti: usize, start: u64, dur: u64, skip: Option<u64>) -> bool {
-        self.tracks[ti].clips.iter().filter(|c| Some(c.id) != skip).all(|c| start + dur <= c.start_ms || c.start_ms + c.duration_ms <= start)
+        self.tracks[ti].clips.iter().filter(|c| Some(c.id) != skip).all(|c| start.saturating_add(dur) <= c.start_ms || c.start_ms.saturating_add(c.duration_ms) <= start)
     }
 }
 
@@ -299,6 +300,17 @@ mod tests {
     }
 
     #[test]
+    fn overlay_row_check_does_not_overflow() {
+        let p = ClioProject::new("t".into(), 1080, 1920).unwrap();
+        main(&p);
+        let a = p.add_overlay("a".into(), "a.png".into(), u64::MAX - 10, 1000).unwrap();
+        let b = p.add_overlay("b".into(), "b.png".into(), u64::MAX - 5, 1000).unwrap();
+        let rows: Vec<_> = p.tracks().into_iter().filter(|t| t.kind == TrackKind::Overlay).collect();
+        assert_eq!(rows.len(), 2, "saturating ends still collide");
+        assert!(rows.iter().any(|r| r.clips.iter().any(|c| c.id == a)) && rows.iter().any(|r| r.clips.iter().any(|c| c.id == b)));
+    }
+
+    #[test]
     fn move_overlay_finds_free_row() {
         let p = ClioProject::new("t".into(), 1080, 1920).unwrap();
         main(&p);
@@ -310,7 +322,7 @@ mod tests {
         assert_eq!(rows[1].clips[0].id, o2);
         assert_eq!(rows[1].clips[0].start_ms, 500);
         assert!(p.move_overlay(o1, 0, 0).is_ok());
-        let (_, a, _) = (0, p.tracks()[0].clips[0].id, 0);
+        let a = p.tracks()[0].clips[0].id;
         assert!(p.move_overlay(a, 0, 0).is_err());
     }
 

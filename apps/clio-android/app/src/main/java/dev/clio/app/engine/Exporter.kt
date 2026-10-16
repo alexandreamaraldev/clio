@@ -59,9 +59,12 @@ data class ExportSpec(val label: String, val width: Int, val height: Int, val fp
  */
 @OptIn(UnstableApi::class)
 class Exporter(private val context: Context) {
-    private var openSources: List<Layers.FrameSource> = emptyList()
     /** Diagnostics toggle used by the device QA export matrix. */
     internal var frameDrop = true
+
+    /** Layer decode counters from the last export (bench/QA diagnostics). */
+    data class LayerStats(val decodedFrames: Int, val requestedFrames: Int)
+    @Volatile internal var lastLayerStats = LayerStats(0, 0); private set
 
     companion object {
         const val MAX_MUXER_GAP_MS = 60_000L
@@ -70,14 +73,17 @@ class Exporter(private val context: Context) {
 
     suspend fun export(snap: Snapshot, spec: ExportSpec, captionStyle: CaptionStyle, onProgress: (Float) -> Unit): Uri {
         val out = File(context.cacheDir, "export-${System.currentTimeMillis()}.mp4")
+        // Layer frame sources live for exactly one export (Exporter instances may be shared).
+        val sources = mutableListOf<Layers.FrameSource>()
         try {
-            val composition = buildComposition(snap, spec, captionStyle)
+            val composition = buildComposition(snap, spec, captionStyle, sources)
             withContext(Dispatchers.Main) { run(composition, out, onProgress) }
-        } finally { openSources.forEach { it.close() }; openSources = emptyList() }
+            lastLayerStats = LayerStats(sources.sumOf { it.decodes }, sources.sumOf { it.requests })
+        } finally { sources.forEach { it.close() } }
         return withContext(Dispatchers.IO) { publish(out, snap.summary.name) }
     }
 
-    private fun buildComposition(snap: Snapshot, spec: ExportSpec, style: CaptionStyle): Composition {
+    private fun buildComposition(snap: Snapshot, spec: ExportSpec, style: CaptionStyle, opened: MutableList<Layers.FrameSource>): Composition {
         val video = snap.tracks.firstOrNull { it.kind == TrackKind.VIDEO }?.clips.orEmpty()
         require(video.isNotEmpty()) { "Adicione um vídeo antes de exportar" }
         val texts = snap.tracks.filter { it.kind == TrackKind.TEXT }.flatMap { it.clips }
@@ -88,8 +94,8 @@ class Exporter(private val context: Context) {
 
         // One frame source per layer, shared by every main item it overlaps (closed after export).
         val layers = Layers.overlayClips(snap)
-        val sources = layers.associate { it.id to Layers.FrameSource(context, it, MediaKind.isImage(context, it.source), spec.width) }
-        openSources = sources.values.toList()
+        val sources = Layers.FrameSource.plan(context, layers, spec.width) { MediaKind.isImage(context, it.source) }
+        opened += sources.values
         val items = video.mapIndexed { index, c ->
             val isImage = MediaKind.isImage(context, c.source)
             val speed = if (isImage) 1f else c.speed

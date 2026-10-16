@@ -73,9 +73,17 @@ object Layers {
         return Triple(bg, a.coerceIn(-1f, 1f), kotlin.math.abs(a) < 1f)
     }
 
+    /**
+     * The current main-clip transition look for Compose (written on Main once per frame). The
+     * blurred backdrop belongs to its clip, so the preview backdrop moves with it during
+     * Slide/Zoom, as in export.
+     */
+    object PreviewTransition { val look = androidx.compose.runtime.mutableStateOf(IDENTITY) }
+
     /** Live preview: ExoPlayer has a single effect chain, so it reads a look pushed once per UI frame. */
     class PreviewLook {
         @Volatile var look: FrameLook = IDENTITY
+            set(v) { field = v; PreviewTransition.look.value = v }
         fun reset() { look = IDENTITY }
         val effects = listOf(
             MatrixTransformation { _ -> ndcMatrix(look.transform) },
@@ -111,74 +119,39 @@ object Layers {
     }
 
     /**
-     * Frames for one overlay layer, shared by every host item it overlaps. Video is decoded
-     * forward in batches with `getFramesAtIndex` (API 28+, one decoder pass instead of a seek per
-     * frame) and drawn into a single reused bitmap at the layer's export size; older devices fall
-     * back to `getScaledFrameAtTime`. Times are layer-local (0 = layer start on the timeline).
+     * Frames for one overlay layer, shared by every host item it overlaps. Video is decoded once,
+     * forward, by a [SequentialVideoDecoder] that picks frames by their real sample timestamps
+     * (VFR-safe) into one reused RGB_565 bitmap; images are decoded once (ARGB, keeps alpha).
+     * [memScale] (<= 1, from [LayerMemory]) shrinks the bitmap to fit the export memory budget;
+     * OverlaySettings scales it back up. Times are layer-local (0 = layer start on the timeline).
      */
-    class FrameSource(private val context: Context, private val c: Clip, private val isImage: Boolean, canvasW: Int) : AutoCloseable {
-        /** Wanted on-canvas width; the bitmap is capped at 4096 px and scaled up by OverlaySettings. */
+    class FrameSource(
+        private val context: Context, private val c: Clip, private val isImage: Boolean, canvasW: Int,
+        /** Display height / width of the source (after rotation). */
+        val aspect: Float, memScale: Float = 1f,
+    ) : AutoCloseable {
+        /** Wanted on-canvas width in px. */
         val wantW = canvasW * c.transform.scale.coerceIn(LayerLimits.scaleRange)
-        val targetW = wantW.toInt().coerceIn(2, 4096)
-        private val aspect = if (c.width > 0u && c.height > 0u) c.height.toFloat() / c.width.toFloat() else 9f / 16f
-        private val targetH = (targetW * aspect).toInt().coerceAtLeast(2)
+        val targetW = (wantW * memScale).toInt().coerceIn(2, 4096)
+        val targetH = (targetW * aspect).toInt().coerceIn(2, 4096)
         private val blank = Bitmap.createBitmap(2, 2, Bitmap.Config.ARGB_8888)
-        private var out: Bitmap? = null
         private var still: Bitmap? = null
-        private var retriever: MediaMetadataRetriever? = null
-        private var fps = 30f
-        private var frameCount = -1
-        private var batchStart = -1
-        private var batch: List<Bitmap> = emptyList()
-        private var shownIndex = -1
-        var decodes = 0; private set
+        private var decoder: SequentialVideoDecoder? = null
+        private var failed = false
+        /** Frames requested by the exporter (one per output frame while visible). */
+        var requests = 0; private set
+        val decodes: Int get() = decoder?.decoded ?: 0
 
-        val latest: Bitmap? get() = out ?: still
+        val latest: Bitmap? get() = still ?: decoder?.bitmap
 
         @Synchronized fun frame(localMs: Long): Bitmap {
+            requests++
             if (isImage) return still ?: decodeStill().also { still = it }
-            val r = retriever ?: open()
-            val srcMs = c.inMs.toLong() + Mix.spanMs(localMs.coerceAtLeast(0), c.speed)
-            if (android.os.Build.VERSION.SDK_INT >= 28 && frameCount > 0) {
-                val idx = (srcMs * fps / 1000f).toInt().coerceIn(0, frameCount - 1)
-                if (idx == shownIndex && out != null) return out!!
-                if (idx !in batchStart until batchStart + batch.size) {
-                    batch.forEach { it.recycle() }
-                    val n = batchSize().coerceAtMost(frameCount - idx)
-                    batch = runCatching { r.getFramesAtIndex(idx, n) }.getOrDefault(emptyList())
-                    batchStart = idx; decodes++
-                }
-                batch.getOrNull(idx - batchStart)?.let { draw(it); shownIndex = idx }
-            } else {
-                val b = runCatching { r.getScaledFrameAtTime(srcMs * 1000, MediaMetadataRetriever.OPTION_CLOSEST, targetW, targetH) }.getOrNull()
-                decodes++
-                b?.let { draw(it); it.recycle() }
-            }
-            return out ?: blank
-        }
-
-        /** Up to [BATCH] frames, but at most ~64 MB of decoded source frames per pass. */
-        private fun batchSize(): Int {
-            val px = (c.width.toLong() * c.height.toLong()).coerceAtLeast(1280L * 720L)
-            return (64L * 1024 * 1024 / (px * 4)).toInt().coerceIn(2, BATCH)
-        }
-
-        private fun open(): MediaMetadataRetriever = MediaMetadataRetriever().also { m ->
-            runCatching {
-                m.setDataSource(context, Uri.parse(c.source))
-                if (android.os.Build.VERSION.SDK_INT >= 28) {
-                    frameCount = m.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_FRAME_COUNT)?.toIntOrNull() ?: -1
-                    val dur = m.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toFloatOrNull() ?: 0f
-                    if (frameCount > 0 && dur > 0f) fps = frameCount * 1000f / dur
-                }
-            }
-            retriever = m
-        }
-
-        /** Scales [src] into the reused output bitmap. */
-        private fun draw(src: Bitmap) {
-            val o = out ?: Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888).also { out = it }
-            android.graphics.Canvas(o).drawBitmap(src, null, android.graphics.Rect(0, 0, o.width, o.height), PAINT)
+            if (failed) return blank
+            val d = decoder ?: runCatching { SequentialVideoDecoder(context, Uri.parse(c.source), targetW, targetH) }
+                .onFailure { failed = true }.getOrNull()?.also { decoder = it } ?: return blank
+            val srcUs = (c.inMs.toLong() + Mix.spanMs(localMs.coerceAtLeast(0), c.speed)) * 1000
+            return runCatching { d.frameAt(srcUs) }.getOrElse { d.bitmap }
         }
 
         private fun decodeStill(): Bitmap = runCatching {
@@ -187,21 +160,26 @@ object Layers {
             var sample = 1
             while (o.outWidth / (sample * 2) >= targetW) sample *= 2
             val b = read { BitmapFactory.decodeStream(it, null, BitmapFactory.Options().apply { inSampleSize = sample }) } ?: return@runCatching null
-            val h = (b.height.toFloat() * targetW / b.width.coerceAtLeast(1)).toInt().coerceAtLeast(2)
-            if (b.width == targetW) b else Bitmap.createScaledBitmap(b, targetW, h, true).also { if (it !== b) b.recycle() }
+            if (b.width == targetW) b else Bitmap.createScaledBitmap(b, targetW, targetH, true).also { if (it !== b) b.recycle() }
         }.getOrNull() ?: blank
 
         private fun <T> read(f: (java.io.InputStream) -> T): T? = context.contentResolver.openInputStream(Uri.parse(c.source))?.use(f)
 
-        @Synchronized override fun close() {
-            runCatching { retriever?.release() }; retriever = null
-            batch.forEach { it.recycle() }; batch = emptyList()
-        }
+        @Synchronized override fun close() { decoder?.close(); decoder = null }
 
         companion object {
-            /** Frames decoded per pass (memory: BATCH full-size source frames). */
-            const val BATCH = 8
-            private val PAINT = android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG)
+            /** Builds one source per layer, sized together under [LayerMemory.BUDGET_BYTES]. */
+            fun plan(context: Context, layers: List<Clip>, canvasW: Int, isImage: (Clip) -> Boolean): Map<ULong, FrameSource> {
+                val info = layers.map { c ->
+                    val img = isImage(c)
+                    val aspect = (if (img) null else SequentialVideoDecoder.probe(context, Uri.parse(c.source))?.let { (w, h, _) -> h.toFloat() / w })
+                        ?: if (c.width > 0u && c.height > 0u) c.height.toFloat() / c.width.toFloat() else 9f / 16f
+                    Triple(c, img, aspect)
+                }
+                val sizes = info.map { (c, _, a) -> val w = (canvasW * c.transform.scale.coerceIn(LayerLimits.scaleRange)).toInt().coerceIn(2, 4096); w to (w * a).toInt().coerceAtLeast(2) }
+                val scale = LayerMemory.fit(sizes, info.map { if (it.second) 4 else 2 })
+                return info.associate { (c, img, a) -> c.id to FrameSource(context, c, img, canvasW, a, scale) }
+            }
         }
     }
 
@@ -227,19 +205,22 @@ object Layers {
 
         override fun getOverlaySettings(presentationTimeUs: Long): OverlaySettings {
             val tr = c.transform
-            val b = src.latest
             val up = src.wantW / src.targetW
-            // Half-size of the layer in background NDC (1 = half the canvas).
-            val halfW = src.wantW / canvasW
-            val halfH = if (b != null && b.width > 0) halfW * b.height / b.width * canvasW / canvasH else halfW * canvasW / canvasH
-            val (bx, ox, inX) = anchor(tr.x.coerceIn(LayerLimits.offsetRange), halfW)
-            val (by, oy, inY) = anchor(tr.y.coerceIn(LayerLimits.offsetRange), halfH)
+            val wPx = src.wantW; val hPx = src.wantW * src.aspect
+            // Half-size of the layer in background NDC (1 = half the canvas). Media3 applies the
+            // overlay anchor after rotating about the layer centre, so the shift stays unrotated.
+            val halfW = wPx / canvasW
+            val halfH = hPx / canvasH
+            val x = tr.x.coerceIn(LayerLimits.offsetRange); val y = tr.y.coerceIn(LayerLimits.offsetRange)
+            val (bx, ox, _) = anchor(x, halfW)
+            val (by, oy, _) = anchor(y, halfH)
+            val on = layerOnCanvas(x * canvasW / 2, y * canvasH / 2, wPx, hPx, tr.rotation, canvasW, canvasH)
             return OverlaySettings.Builder()
                 .setBackgroundFrameAnchor(bx, by)
                 .setOverlayFrameAnchor(ox, oy)
                 .setScale(up, up)
                 .setRotationDegrees(tr.rotation)
-                .setAlphaScale(if (visible && inX && inY) tr.opacity else 0f)
+                .setAlphaScale(if (visible && on) tr.opacity else 0f)
                 .build()
         }
     }

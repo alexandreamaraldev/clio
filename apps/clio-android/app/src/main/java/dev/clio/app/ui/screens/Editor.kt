@@ -59,9 +59,9 @@ private val tools = listOf(
     Tool(Icons.Outlined.MusicNote, "Música"), Tool(Icons.Outlined.ClosedCaption, "Legendas"),
     Tool(Icons.Outlined.Speed, "Velocidade"), Tool(Icons.Outlined.VolumeUp, "Volume"),
     Tool(Icons.Outlined.AspectRatio, "Formato"), Tool(Icons.Outlined.ContentCopy, "Duplicar"),
+    Tool(Icons.Outlined.Layers, "Camadas"), Tool(Icons.Outlined.Compare, "Transição"),
     Tool(Icons.Outlined.Tune, "Ajustes", ready = false), Tool(Icons.Outlined.FilterVintage, "Filtros", ready = false),
     Tool(Icons.Outlined.AutoAwesome, "Efeitos", ready = false),
-    Tool(Icons.Outlined.Layers, "Camadas"), Tool(Icons.Outlined.Compare, "Transição"),
 )
 const val TOOL_SPLIT = 0
 const val TOOL_TEXT = 1
@@ -71,8 +71,8 @@ const val TOOL_SPEED = 4
 const val TOOL_VOLUME = 5
 const val TOOL_FORMAT = 6
 const val TOOL_DUPLICATE = 7
-const val TOOL_LAYERS = 11
-const val TOOL_TRANSITION = 12
+const val TOOL_LAYERS = 8
+const val TOOL_TRANSITION = 9
 private val panelTools = setOf(TOOL_TEXT, TOOL_MUSIC, TOOL_CAPTIONS, TOOL_SPEED, TOOL_VOLUME, TOOL_FORMAT, TOOL_LAYERS, TOOL_TRANSITION)
 
 @Immutable
@@ -533,7 +533,12 @@ private fun BlurBackdrop(clips: List<UiClip>, playhead: () -> Float) {
     val c = clip ?: return
     val img by produceState<ImageBitmap?>(null, c.source, c.inS) { value = c.source?.let { thumbs(it, (c.inS * 1000).toLong() + 200) } }
     Crossfade(img, animationSpec = ClioMotion.fade(), label = "blur") { b ->
-        if (b != null) Image(b, null, Modifier.fillMaxSize().blur(28.dp).graphicsLayer { alpha = 0.85f }, contentScale = ContentScale.Crop)
+        // Moves with its clip during Slide/Zoom/Fade (read in the draw phase only).
+        if (b != null) Image(b, null, Modifier.fillMaxSize().graphicsLayer {
+            val l = dev.clio.app.engine.Layers.PreviewTransition.look.value
+            translationX = l.transform.x * size.width / 2; translationY = -l.transform.y * size.height / 2
+            scaleX = l.transform.scale; scaleY = l.transform.scale; alpha = 0.85f * l.brightness
+        }.blur(28.dp), contentScale = ContentScale.Crop)
     }
 }
 
