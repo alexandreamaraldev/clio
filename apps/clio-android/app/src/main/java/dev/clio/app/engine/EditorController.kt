@@ -238,7 +238,12 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
     }
 
     // --- EditorActions ---
-    override fun back() { player.pause(); flushSave(); _events.tryEmit(EditorEvent.Back) }
+    /** Home lists drafts as soon as it appears, so leave only after the final save is on disk. */
+    override fun back() {
+        player.pause()
+        val flush = flushSave()
+        viewModelScope.launch { withTimeoutOrNull(2000) { flush?.join() }; _events.tryEmit(EditorEvent.Back) }
+    }
     override fun export() { player.pause(); exportState = ExportState.Choosing }
 
     fun closeExport() { exportJob?.cancel(); exportState = ExportState.Closed }
@@ -389,13 +394,14 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
     }
 
     /** Final save on the app scope so leaving the editor never loses the last edit. */
-    private fun flushSave() {
+    private fun flushSave(): Job? {
         saveJob?.cancel()
-        if (!ready.isCompleted) return
+        if (!ready.isCompleted) return null
         val p = project
-        appScope.launch {
+        return appScope.launch {
             val json = withContext(engine) { if (p.summary().clipCount == 0u) null else p.toDraftJson() } ?: return@launch
-            if (json != lastJson) drafts.saveBlocking(draftId, json)
+            if (json != lastJson) withContext(Dispatchers.IO) { drafts.saveBlocking(draftId, json) }
+            lastJson = json
         }
     }
 

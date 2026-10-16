@@ -39,7 +39,7 @@ fun HomeScreen(
     onQuickCaptions: () -> Unit = {},
 ) {
     LazyColumn(
-        Modifier.fillMaxSize().background(ClioColors.Ink),
+        Modifier.testTag("home").fillMaxSize().background(ClioColors.Ink),
         contentPadding = WindowInsets.systemBars.asPaddingValues().let {
             PaddingValues(top = it.calculateTopPadding() + Space.lg, bottom = it.calculateBottomPadding() + Space.xxl)
         },
