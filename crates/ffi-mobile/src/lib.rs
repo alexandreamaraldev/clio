@@ -8,6 +8,9 @@ use std::sync::Mutex;
 
 uniffi::setup_scaffolding!();
 
+mod text;
+pub use text::*;
+
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum ClioError {
     #[error("invalid argument: {msg}")]
@@ -122,6 +125,12 @@ struct State {
     /// When fitting, fill the empty area with a blurred copy of the frame.
     #[serde(default)]
     blur_bg: bool,
+    /// Whisper language for automatic captions (ISO 639-1); None = auto-detect.
+    #[serde(default)]
+    speech_language: Option<String>,
+    /// Styles of text clips by clip id.
+    #[serde(default)]
+    text_styles: std::collections::BTreeMap<u64, TextStyle>,
     #[serde(skip)]
     history: History,
 }
@@ -137,6 +146,7 @@ struct Snap {
     next_id: u64,
     tracks: Vec<Track>,
     captions: Vec<Caption>,
+    text_styles: std::collections::BTreeMap<u64, TextStyle>,
 }
 
 #[derive(Default)]
@@ -149,7 +159,7 @@ const MAX_UNDO: usize = 100;
 
 impl State {
     fn snap(&self) -> Snap {
-        Snap { name: self.project.name.clone(), width: self.width, height: self.height, fill: self.fill, blur_bg: self.blur_bg, next_id: self.next_id, tracks: self.tracks.clone(), captions: self.captions.clone() }
+        Snap { name: self.project.name.clone(), width: self.width, height: self.height, fill: self.fill, blur_bg: self.blur_bg, next_id: self.next_id, tracks: self.tracks.clone(), captions: self.captions.clone(), text_styles: self.text_styles.clone() }
     }
     fn restore(&mut self, x: Snap) {
         self.project.name = x.name;
@@ -160,6 +170,7 @@ impl State {
         self.next_id = x.next_id;
         self.tracks = x.tracks;
         self.captions = x.captions;
+        self.text_styles = x.text_styles;
     }
     /// Record the current state before a mutation.
     fn checkpoint(&mut self) {
@@ -197,6 +208,9 @@ pub struct Snapshot {
     pub summary: ProjectSummary,
     pub tracks: Vec<Track>,
     pub captions: Vec<Caption>,
+    pub text_styles: Vec<StyledText>,
+    /// Whisper language for automatic captions; None = auto-detect.
+    pub speech_language: Option<String>,
     pub can_undo: bool,
     pub can_redo: bool,
     pub fill: bool,
@@ -234,7 +248,7 @@ impl ClioProject {
                 captions: Vec::new(),
                 fill: false,
                 blur_bg: false,
-                history: History::default(),
+                text_styles: Default::default(), speech_language: None, history: History::default(),
             }),
         })
     }
@@ -259,7 +273,8 @@ impl ClioProject {
 
     /// Full draft (engine project document + timeline + captions) for autosave.
     pub fn to_draft_json(&self) -> Result<String, ClioError> {
-        let s = self.st();
+        let mut s = self.st();
+        s.prune_text_styles();
         #[derive(serde::Serialize)]
         struct DraftRef<'a> { version: u32, state: &'a State }
         serde_json::to_string(&DraftRef { version: DRAFT_VERSION, state: &s }).map_err(|e| ClioError::Serialize { msg: e.to_string() })
@@ -274,7 +289,8 @@ impl ClioProject {
     pub fn set_captions(&self, captions: Vec<Caption>) {
         let mut s = self.st();
         s.checkpoint();
-        s.captions = captions;
+        // Keep word timings in sync with edited text (see `text::effective_words`).
+        s.captions = captions.into_iter().map(|c| Caption { words: effective_words(&c), ..c }).collect();
     }
 
     pub fn set_fill(&self, fill: bool) {
@@ -366,6 +382,7 @@ impl ClioProject {
         let mut c = s.tracks[ti].clips[ci].clone();
         c.id = id;
         c.start_ms += c.duration_ms;
+        s.copy_text_style(clip_id, id);
         s.tracks[ti].clips.insert(ci + 1, c);
         s.relayout(ti);
         Ok(id)
@@ -481,6 +498,8 @@ impl ClioProject {
             summary: summarize(&s),
             tracks: s.tracks.clone(),
             captions: s.captions.clone(),
+            text_styles: s.styled_texts(),
+            speech_language: s.speech_language.clone(),
             can_undo: !s.history.undo.is_empty(),
             can_redo: !s.history.redo.is_empty(),
             fill: s.fill,
@@ -504,6 +523,7 @@ impl ClioProject {
         for c in &mut t.clips[ci..] {
             c.start_ms = c.start_ms.saturating_sub(gone.duration_ms);
         }
+        s.prune_text_styles();
         true
     }
 
@@ -562,6 +582,7 @@ impl ClioProject {
                 };
                 t.clips.insert(i + 1, right);
                 s.next_id += 1;
+                s.copy_text_style(clip_id, new_id);
                 s.history.undo.push(before);
                 s.history.redo.clear();
                 return Ok(new_id);
@@ -636,6 +657,9 @@ pub struct Caption {
     pub start_ms: u64,
     pub end_ms: u64,
     pub text: String,
+    /// Per-word timings (Whisper), used by word-by-word presets. Empty for old drafts.
+    #[serde(default)]
+    pub words: Vec<CaptionWord>,
 }
 
 /// Placeholder cues (used only when no speech model is available, e.g. design previews).
@@ -646,7 +670,7 @@ pub fn generate_captions(duration_ms: u64) -> Vec<Caption> {
     lines
         .iter()
         .enumerate()
-        .map(|(i, t)| Caption { start_ms: i as u64 * step, end_ms: (i as u64 + 1) * step - 100, text: (*t).into() })
+        .map(|(i, t)| edit_caption_text(Caption { start_ms: i as u64 * step, end_ms: (i as u64 + 1) * step - 100, text: (*t).into(), words: vec![] }, (*t).into()))
         .collect()
 }
 
@@ -738,11 +762,12 @@ fn group_words(words: &[(u64, u64, String)]) -> Vec<Caption> {
                 c.text.push(' ');
                 c.text.push_str(w);
                 c.end_ms = *e;
+                c.words.push(CaptionWord { start_ms: *s, end_ms: *e, text: w.clone() });
                 continue;
             }
             out.push(cur.take().unwrap());
         }
-        cur = Some(Caption { start_ms: *s, end_ms: *e, text: w.clone() });
+        cur = Some(Caption { start_ms: *s, end_ms: *e, text: w.clone(), words: vec![CaptionWord { start_ms: *s, end_ms: *e, text: w.clone() }] });
     }
     out.extend(cur);
     // Whisper can repeat itself on music/noise: drop empty and consecutive duplicate lines.
@@ -895,4 +920,21 @@ mod tests {
         let q = ClioProject::from_draft_json(j).unwrap();
         assert_eq!((q.tracks()[0].clips[0].speed, q.tracks()[0].clips[0].volume), (1.0, 1.0));
     }
+
+    #[test]
+    fn grouped_captions_keep_word_timings() {
+        let w = |s, e, t: &str| (s, e, t.to_string());
+        let caps = group_words(&[w(0, 300, "Olá,"), w(300, 700, "você"), w(700, 1000, "está"), w(1000, 1300, "aqui."), w(2500, 2900, "Não")]);
+        assert_eq!(caps.len(), 2);
+        assert_eq!(caps[0].text, "Olá, você está aqui.");
+        assert_eq!(caps[0].words.len(), 4);
+        assert_eq!(caps[0].words[1], CaptionWord { start_ms: 300, end_ms: 700, text: "você".into() });
+        assert_eq!(caps[1].words[0].text, "Não");
+        let p = ClioProject::new("t".into(), 1080, 1920).unwrap();
+        p.set_captions(vec![Caption { text: "Olá, vocês estão aqui.".into(), ..caps[0].clone() }]);
+        assert_eq!(p.captions()[0].words[1].text, "vocês");
+        assert_eq!(p.captions()[0].words[1].start_ms, 300);
+        assert_eq!(generate_captions(4000)[0].words.len(), 4);
+    }
+
 }
