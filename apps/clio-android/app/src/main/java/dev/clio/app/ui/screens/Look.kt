@@ -26,6 +26,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.role
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
@@ -84,7 +85,7 @@ fun FiltersPanel(clip: UiClip?, grade: ColorGrade, onPreview: (ColorGrade?) -> U
             }
         }
         Spacer(Modifier.height(Space.sm))
-        LazyRow(horizontalArrangement = Arrangement.spacedBy(Space.sm)) {
+        LazyRow(Modifier.testTag("filter-strip"), horizontalArrangement = Arrangement.spacedBy(Space.sm)) {
             val all = listOf("" to "Nenhum") + LookPresets.all
             items(all, key = { it.first }) { (id, label) ->
                 FilterThumb(label, base, id, lib, sync = still, selected = g.filter == id) {
