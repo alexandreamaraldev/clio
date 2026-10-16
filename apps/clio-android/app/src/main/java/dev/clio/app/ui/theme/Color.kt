@@ -8,7 +8,7 @@ import androidx.compose.ui.graphics.Color
 
 /**
  * Clio palette — restrained, near-monochrome (Apple / Vercel / Anthropic inspired).
- * One warm accent ("Clay") used sparingly. Ships in dark and light.
+ * One warm accent ("Clay", brand #F2683C) used sparingly. Ships in dark and light.
  */
 @Immutable
 data class ClioPalette(
@@ -27,6 +27,8 @@ data class ClioPalette(
     val OnPrimary: Color,
     val Clay: Color,
     val ClaySoft: Color,
+    val ClayText: Color,       // accent for text/icons on surfaces (WCAG AA)
+    val OnClay: Color,         // text/icons on a Clay fill
     val Scrim: Color,
     // Media & timeline
     val PreviewTop: Color,
@@ -44,7 +46,7 @@ val DarkPalette = ClioPalette(
     Hairline = Color(0x14FFFFFF), HairlineStrong = Color(0x26FFFFFF),
     TextPrimary = Color(0xFFEDEDED), TextSecondary = Color(0xFFA1A1AA), TextTertiary = Color(0xFF71717A),
     Primary = Color(0xFFF5F5F4), OnPrimary = Color(0xFF0A0A0B),
-    Clay = Color(0xFFD97757), ClaySoft = Color(0x29D97757), Scrim = Color(0x73000000),
+    Clay = Color(0xFFF2683C), ClaySoft = Color(0x29F2683C), ClayText = Color(0xFFF2683C), OnClay = Color(0xFF1A0B05), Scrim = Color(0x73000000),
     PreviewTop = Color(0xFF26262A), PreviewBottom = Color(0xFF151517), OnMedia = Color.White, MediaScrim = Color(0x73000000),
     TrackAudio = Color(0x3355A68A), CaptionHighlight = Color(0xFFFFD27A),
 )
@@ -56,7 +58,7 @@ val LightPalette = ClioPalette(
     Hairline = Color(0x14000000), HairlineStrong = Color(0x24000000),
     TextPrimary = Color(0xFF0A0A0B), TextSecondary = Color(0xFF52525B), TextTertiary = Color(0xFF8A8A93),
     Primary = Color(0xFF111113), OnPrimary = Color(0xFFFAFAF9),
-    Clay = Color(0xFFC96442), ClaySoft = Color(0x1FC96442), Scrim = Color(0x40000000),
+    Clay = Color(0xFFF2683C), ClaySoft = Color(0x1FF2683C), ClayText = Color(0xFFB8461E), OnClay = Color(0xFF1A0B05), Scrim = Color(0x40000000),
     PreviewTop = Color(0xFF2E2E32), PreviewBottom = Color(0xFF18181B), OnMedia = Color.White, MediaScrim = Color(0x73000000),
     TrackAudio = Color(0x4055A68A), CaptionHighlight = Color(0xFFFFD27A),
 )

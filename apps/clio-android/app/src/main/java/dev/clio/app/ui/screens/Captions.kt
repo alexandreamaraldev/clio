@@ -72,11 +72,11 @@ fun CaptionsPanel(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 val spin by rememberInfiniteTransition(label = "g").animateFloat(0f, 360f, infiniteRepeatable(tween(1200, easing = LinearEasing)), label = "r")
-                Icon(Icons.Outlined.AutoAwesome, null, tint = ClioColors.Clay,
+                Icon(Icons.Outlined.AutoAwesome, null, tint = ClioColors.ClayText,
                     modifier = Modifier.size(14.dp).then(if (generating) Modifier.graphicsLayer { rotationZ = spin } else Modifier))
                 Spacer(Modifier.width(6.dp))
                 Text(if (generating) "Gerando…" else if (status is CaptionStatus.Failed) "Tentar de novo" else if (caps.isEmpty()) "Gerar automático" else "Gerar de novo",
-                    style = MaterialTheme.typography.labelMedium, color = ClioColors.Clay)
+                    style = MaterialTheme.typography.labelMedium, color = ClioColors.ClayText)
             }
         }
         Spacer(Modifier.height(Space.sm))
@@ -100,7 +100,7 @@ fun CaptionsPanel(
             }
             val shown by animateFloatAsState(p, ClioMotion.gentle(), label = "cp")
             Column(Modifier.padding(top = Space.sm)) {
-                Text(label, style = MaterialTheme.typography.labelMedium, color = if (status is CaptionStatus.Failed) ClioColors.Clay else ClioColors.TextTertiary)
+                Text(label, style = MaterialTheme.typography.labelMedium, color = if (status is CaptionStatus.Failed) ClioColors.ClayText else ClioColors.TextTertiary)
                 if (status !is CaptionStatus.Failed) {
                     Spacer(Modifier.height(6.dp))
                     Box(Modifier.fillMaxWidth().height(3.dp).clip(ClioShapes.pill).background(ClioColors.SurfaceHigh)) {

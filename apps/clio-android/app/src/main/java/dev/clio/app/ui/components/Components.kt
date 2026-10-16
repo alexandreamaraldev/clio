@@ -119,10 +119,10 @@ fun Pill(text: String, modifier: Modifier = Modifier, icon: ImageVector? = null,
         verticalAlignment = Alignment.CenterVertically,
     ) {
         if (icon != null) {
-            Icon(icon, null, tint = if (accent) ClioColors.Clay else ClioColors.TextSecondary, modifier = Modifier.size(14.dp))
+            Icon(icon, null, tint = if (accent) ClioColors.ClayText else ClioColors.TextSecondary, modifier = Modifier.size(14.dp))
             Spacer(Modifier.width(6.dp))
         }
-        Text(text, style = MaterialTheme.typography.labelMedium, color = if (accent) ClioColors.Clay else ClioColors.TextSecondary)
+        Text(text, style = MaterialTheme.typography.labelMedium, color = if (accent) ClioColors.ClayText else ClioColors.TextSecondary)
     }
 }
 

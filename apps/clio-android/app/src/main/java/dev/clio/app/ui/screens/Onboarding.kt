@@ -63,7 +63,7 @@ fun OnboardingScreen(onDone: () -> Unit) {
             HorizontalPager(pager, Modifier.fillMaxWidth().height(220.dp)) { i ->
                 val off = ((pager.currentPage - i) + pager.currentPageOffsetFraction).absoluteValue
                 Column(Modifier.graphicsLayer { alpha = 1f - off.coerceIn(0f, 1f); translationX = off * 60f }) {
-                    Text(pages[i].eyebrow.uppercase(), style = MaterialTheme.typography.labelSmall, color = ClioColors.Clay)
+                    Text(pages[i].eyebrow.uppercase(), style = MaterialTheme.typography.labelSmall, color = ClioColors.ClayText)
                     Spacer(Modifier.height(Space.md))
                     Text(pages[i].title, style = MaterialTheme.typography.displayMedium, color = ClioColors.TextPrimary)
                     Spacer(Modifier.height(Space.md))
