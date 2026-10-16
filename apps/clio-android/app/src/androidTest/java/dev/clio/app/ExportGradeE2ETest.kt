@@ -258,7 +258,8 @@ class ExportGradeE2ETest {
                 android.util.Log.i("ClioQA", "CLIO-QA grade-hdr $label: outcome=error \"${st.message}\"")
                 assertPtBrHdrError(st.message, label)
                 compose.onNodeWithText(HDR_ERROR, substring = true).assertIsDisplayed()
-                compose.onNodeWithText("Fechar").performClick()
+                // The sheet can be taller than the screen when the raw cause chain is appended; click via semantics.
+                compose.onNodeWithText("Fechar").performSemanticsAction(androidx.compose.ui.semantics.SemanticsActions.OnClick)
                 compose.waitUntil(10_000) { QaHooks.export is ExportState.Closed }
                 // Editor still usable: undo the grade, then redo it.
                 compose.onNodeWithContentDescription("Desfazer").performClick()
