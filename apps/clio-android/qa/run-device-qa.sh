@@ -6,7 +6,7 @@ set -uo pipefail
 APP=$1; TEST=$2; VIDEO=$3; OUT=$4
 PKG=dev.clio.app
 RUNNER=$PKG.test/androidx.test.runner.AndroidJUnitRunner
-TESTS=(EditorE2ETest#fullEditAndExport EditorE2ETest#splitSurvivesRecreateAndReopen ExportMatrixTest#matrix AudioMixE2ETest#overlappingLanesExport)
+TESTS=(EditorE2ETest#fullEditAndExport EditorE2ETest#splitSurvivesRecreateAndReopen ExportMatrixTest#matrix AudioMixE2ETest#overlappingLanesExport AudioMixRmsE2ETest#overlappingLanesSoundOnlyInTheirWindows)
 mkdir -p "$OUT/screens" "$OUT/screenrecord"
 : > "$OUT/results.txt"
 
