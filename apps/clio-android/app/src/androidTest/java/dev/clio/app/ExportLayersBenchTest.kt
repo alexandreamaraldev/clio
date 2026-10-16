@@ -41,6 +41,8 @@ class ExportLayersBenchTest {
         return dst
     }
 
+    private val CEILING_MS = 240_000L
+
     private fun log(line: String) { println(line); android.util.Log.i("ClioQA", line) }
 
     private fun project(src: String, layers: Int, w: UInt = 1280u, h: UInt = 720u): ClioProject {
@@ -59,8 +61,17 @@ class ExportLayersBenchTest {
     private fun run(label: String, p: ClioProject): Exporter.LayerStats {
         val ex = Exporter(ctx)
         val t0 = SystemClock.elapsedRealtime()
-        runBlocking { ex.export(p.snapshot(), ExportSpec(label, 720, 1280, 30), CaptionStyle.Clean) {} }
+        val snap = p.snapshot()
+        val uri = runBlocking { ex.export(snap, ExportSpec(label, 720, 1280, 30), CaptionStyle.Clean) {} }
         val ms = SystemClock.elapsedRealtime() - t0
+        // Real output: size, duration, fps, audio. Ceiling is generous (swiftshader emulator, ~10x headroom).
+        val info = ExportProbe.info(ctx, uri)
+        log("CLIO-QA bench $label output: $info")
+        assertEquals("$label size", 720 to 1280, info.width to info.height)
+        assertTrue("$label duration ${info.durationMs} vs ${snap.summary.durationMs}", kotlin.math.abs(info.durationMs - snap.summary.durationMs.toLong()) <= 350)
+        assertEquals("$label fps", 30f, info.fps, 1.5f)
+        assertTrue("$label audio track", info.hasAudio)
+        assertTrue("$label export took ${ms}ms (ceiling $CEILING_MS)", ms < CEILING_MS)
         val st = ex.lastLayerStats
         val perFrame = if (st.requestedFrames > 0) st.decodedFrames.toFloat() / st.requestedFrames else 0f
         log("CLIO-QA bench $label: ${ms}ms, layer decodes ${st.decodedFrames} / output-frame requests ${st.requestedFrames} = ${"%.2f".format(perFrame)} per frame")
