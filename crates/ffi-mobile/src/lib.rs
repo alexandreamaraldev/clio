@@ -8,6 +8,9 @@ use std::sync::Mutex;
 
 uniffi::setup_scaffolding!();
 
+mod audio;
+pub use audio::waveform_peaks;
+
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum ClioError {
     #[error("invalid argument: {msg}")]
