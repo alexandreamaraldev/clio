@@ -12,6 +12,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import dev.clio.app.engine.Aspect
 import dev.clio.app.ui.components.pressable
@@ -44,8 +45,8 @@ fun Choice(text: String, selected: Boolean, modifier: Modifier = Modifier, onCli
 }
 
 @Composable
-private fun ClioSlider(value: Float, onChange: (Float) -> Unit, onDone: () -> Unit, range: ClosedFloatingPointRange<Float> = 0f..1f) {
-    Slider(value, onChange, valueRange = range, onValueChangeFinished = onDone, colors = SliderDefaults.colors(
+private fun ClioSlider(value: Float, onChange: (Float) -> Unit, onDone: () -> Unit, range: ClosedFloatingPointRange<Float> = 0f..1f, tag: String = "") {
+    Slider(value, onChange, Modifier.testTag(tag), valueRange = range, onValueChangeFinished = onDone, colors = SliderDefaults.colors(
         thumbColor = ClioColors.Clay, activeTrackColor = ClioColors.Clay, inactiveTrackColor = ClioColors.SurfaceHigh,
         activeTickColor = ClioColors.Clay, inactiveTickColor = ClioColors.SurfaceHigh))
 }
@@ -98,11 +99,11 @@ fun VolumePanel(clip: UiClip?, onAudio: (volume: Float, fadeInS: Float, fadeOutS
             Spacer(Modifier.width(Space.sm))
             Choice(if (clip.muted) "Ativar som" else "Silenciar", clip.muted) { commit(!clip.muted) }
         }
-        ClioSlider(vol, { vol = it }, { commit(clip.muted) }, 0f..2f)
+        ClioSlider(vol, { vol = it }, { commit(clip.muted) }, 0f..2f, "volume")
         Text("Aparecer  ${"%.1f".format(fi).replace('.', ',')} s", style = MaterialTheme.typography.labelMedium, color = ClioColors.TextSecondary)
-        ClioSlider(fi, { fi = it }, { commit(clip.muted) }, 0f..maxFade.coerceAtLeast(0.01f))
+        ClioSlider(fi, { fi = it }, { commit(clip.muted) }, 0f..maxFade.coerceAtLeast(0.01f), "fade-in")
         Text("Sumir  ${"%.1f".format(fo).replace('.', ',')} s", style = MaterialTheme.typography.labelMedium, color = ClioColors.TextSecondary)
-        ClioSlider(fo, { fo = it }, { commit(clip.muted) }, 0f..maxFade.coerceAtLeast(0.01f))
+        ClioSlider(fo, { fo = it }, { commit(clip.muted) }, 0f..maxFade.coerceAtLeast(0.01f), "fade-out")
     }
 }
 

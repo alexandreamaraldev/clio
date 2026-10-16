@@ -53,7 +53,10 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
     private val models = ModelManager(app)
     private val appScope = (app as ClioApp).appScope
     private val exporter = Exporter(app)
-    var exportState by mutableStateOf<ExportState>(ExportState.Closed); private set
+    private val exportStateHolder = mutableStateOf<ExportState>(ExportState.Closed)
+    var exportState: ExportState
+        get() = exportStateHolder.value
+        private set(v) { exportStateHolder.value = v; QaHooks.export = v }
     private var lastSnap: Snapshot? = null
     private var exportJob: Job? = null
 
@@ -63,11 +66,15 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
 
     val draftId: String = handle["draftId"] ?: DraftStore.newId()
     private val isNew: Boolean = handle["isNew"] ?: false
+    private val imports: List<String> = handle.get<ArrayList<String>>("imports").orEmpty()
     private lateinit var project: ClioProject
     private var videoTrack: ULong = 0u
     private val ready = CompletableDeferred<Unit>()
 
-    var ui by mutableStateOf(EditorUi("", emptyList(), 0f, false, hasMedia = false, loading = true)); private set
+    private val uiHolder = mutableStateOf(EditorUi("", emptyList(), 0f, false, hasMedia = false, loading = true))
+    var ui: EditorUi
+        get() = uiHolder.value
+        private set(v) { uiHolder.value = v; QaHooks.ui = v }
     /** Read only inside draw/layout lambdas so playback doesn't recompose the tree per frame. */
     private val playheadState = mutableFloatStateOf(0f)
     val playhead: () -> Float = { playheadState.floatValue }
@@ -104,7 +111,8 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
             }
             ready.complete(Unit)
             apply(edit(save = false) { }, rebuildPlayer = true)
-            if (isNew) _events.tryEmit(EditorEvent.PickMedia)
+            if (isNew && imports.isNotEmpty()) addMedia(imports.map(Uri::parse))
+            else if (isNew) _events.tryEmit(EditorEvent.PickMedia)
         }
     }
 
@@ -397,4 +405,10 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
         musicPlayer.release()
         // `project` is freed by its Cleaner once the flush above no longer references it.
     }
+}
+
+/** Latest editor state for instrumented end-to-end tests (read-only observation, no behaviour). */
+object QaHooks {
+    @Volatile var ui: EditorUi? = null
+    @Volatile var export: ExportState? = null
 }

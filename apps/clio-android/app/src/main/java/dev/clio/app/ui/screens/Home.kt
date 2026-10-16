@@ -1,5 +1,6 @@
 package dev.clio.app.ui.screens
 
+import androidx.compose.ui.platform.testTag
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
@@ -107,7 +108,7 @@ fun HomeScreen(
         }
         items(drafts.chunked(2)) { row ->
             Row(Modifier.padding(horizontal = Space.lg), horizontalArrangement = Arrangement.spacedBy(Space.sm)) {
-                row.forEach { d -> DraftCard(d, Modifier.weight(1f)) { onOpenDraft(d) } }
+                row.forEach { d -> DraftCard(d, Modifier.weight(1f).testTag("draft-${drafts.indexOf(d)}")) { onOpenDraft(d) } }
                 if (row.size == 1) Spacer(Modifier.weight(1f))
             }
         }

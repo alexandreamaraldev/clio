@@ -42,6 +42,9 @@ class MainActivity : ComponentActivity() {
         val store = AppStore(this)
         val draftStore = DraftStore(this)
         val media = Media(this)
+        // Shared media opens straight into a new project (only on first creation, not on recreate).
+        val imports = if (savedInstanceState == null) sharedUris(intent) else emptyList()
+        if (imports.isNotEmpty()) store.onboarded = true
         val thumbs: suspend (String, Long) -> androidx.compose.ui.graphics.ImageBitmap? = { s, t -> media.thumbnail(s, t) }
         setContent {
             var mode by rememberSaveable { mutableStateOf(store.themeMode) }
@@ -59,7 +62,11 @@ class MainActivity : ComponentActivity() {
             }
             CompositionLocalProvider(LocalThumbnails provides thumbs) {
                 ClioTheme(mode) {
-                    var route by rememberSaveable { mutableStateOf(if (store.onboarded) Routes.HOME else Routes.ONBOARDING) }
+                    var route by rememberSaveable { mutableStateOf(when {
+                        imports.isNotEmpty() -> Routes.editor(DraftStore.newId(), isNew = true)
+                        store.onboarded -> Routes.HOME
+                        else -> Routes.ONBOARDING
+                    }) }
                     var streak by remember { mutableIntStateOf(store.streak) }
                     var drafts by remember { mutableStateOf<List<Draft>>(emptyList()) }
                     LaunchedEffect(route) { if (route == Routes.HOME) drafts = loadDraftCards(draftStore) }
@@ -85,7 +92,7 @@ class MainActivity : ComponentActivity() {
                                 )
                                 r.startsWith("editor:") -> {
                                     val parts = r.split(':')
-                                    EditorRoute(parts[1], parts.getOrNull(2) == "new", parts.getOrNull(3)?.toIntOrNull() ?: -1,
+                                    EditorRoute(parts[1], parts.getOrNull(2) == "new", parts.getOrNull(3)?.toIntOrNull() ?: -1, imports,
                                         onBack = { route = Routes.HOME })
                                 }
                             }
@@ -98,11 +105,11 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-private fun EditorRoute(draftId: String, isNew: Boolean, initialTool: Int, onBack: () -> Unit) {
+private fun EditorRoute(draftId: String, isNew: Boolean, initialTool: Int, imports: List<String>, onBack: () -> Unit) {
     val vm: EditorController = viewModel(key = "editor-$draftId", factory = viewModelFactory {
         initializer {
             val app = this[androidx.lifecycle.ViewModelProvider.AndroidViewModelFactory.APPLICATION_KEY]!!
-            EditorController(app, SavedStateHandle(mapOf("draftId" to draftId, "isNew" to isNew)))
+            EditorController(app, SavedStateHandle(mapOf("draftId" to draftId, "isNew" to isNew, "imports" to ArrayList(if (isNew) imports else emptyList()))))
         }
     })
     val ctx = androidx.compose.ui.platform.LocalContext.current
@@ -147,3 +154,11 @@ private fun EditorRoute(draftId: String, isNew: Boolean, initialTool: Int, onBac
         }
     }
 }
+
+/** Video/photo URIs from an ACTION_SEND / ACTION_SEND_MULTIPLE intent. */
+@Suppress("DEPRECATION")
+private fun sharedUris(intent: android.content.Intent?): List<String> = when (intent?.action) {
+    android.content.Intent.ACTION_SEND -> listOfNotNull(intent.getParcelableExtra<android.net.Uri>(android.content.Intent.EXTRA_STREAM))
+    android.content.Intent.ACTION_SEND_MULTIPLE -> intent.getParcelableArrayListExtra<android.net.Uri>(android.content.Intent.EXTRA_STREAM).orEmpty()
+    else -> emptyList()
+}.map { it.toString() }

@@ -14,6 +14,7 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "0.1.0"
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
     }
     buildTypes {
@@ -50,4 +51,10 @@ dependencies {
     // UniFFI-generated Kotlin bindings load the Rust engine through JNA.
     implementation("net.java.dev.jna:jna:5.14.0@aar")
     testImplementation("junit:junit:4.13.2")
+    androidTestImplementation(bom)
+    androidTestImplementation("androidx.compose.ui:ui-test-junit4")
+    androidTestImplementation("androidx.test:runner:1.6.2")
+    androidTestImplementation("androidx.test:core-ktx:1.6.1")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    debugImplementation("androidx.compose.ui:ui-test-manifest")
 }

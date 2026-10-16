@@ -1,3 +1,4 @@
 <paths>
+    <cache-path name="import" path="import/" />
     <external-files-path name="movies" path="Movies/" />
 </paths>

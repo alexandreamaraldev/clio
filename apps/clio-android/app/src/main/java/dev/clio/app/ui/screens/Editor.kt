@@ -22,6 +22,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.blur
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
@@ -226,7 +227,7 @@ fun EditorScreen(
         // Tool dock (glass)
         GlassSurface(Modifier.fillMaxWidth().padding(Space.sm), shape = ClioShapes.lg) {
             val dock = androidx.compose.foundation.lazy.rememberLazyListState()
-            LazyRow(state = dock, contentPadding = PaddingValues(start = Space.sm, end = Space.xl, top = Space.xs, bottom = Space.xs)) {
+            LazyRow(modifier = Modifier.testTag("tools"), state = dock, contentPadding = PaddingValues(start = Space.sm, end = Space.xl, top = Space.xs, bottom = Space.xs)) {
                 items(tools.size) { i ->
                     val t = tools[i]
                     Box {
@@ -328,7 +329,7 @@ fun Timeline(
     LaunchedEffect(playing) { if (playing) fling.stop() }
 
     BoxWithConstraints(
-        Modifier.fillMaxWidth().height(220.dp)
+        Modifier.fillMaxWidth().height(220.dp).testTag("timeline")
             .pointerInput(Unit) {
                 awaitEachGesture {
                     val down = awaitFirstDown(requireUnconsumed = false)
@@ -383,7 +384,7 @@ fun Timeline(
                     val editable = t.kind == "video" || t.kind == "audio"
                     t.clips.forEachIndexed { i, c ->
                         key(c.id) {
-                            ClipView(t.kind, c, selected == c.id, offset, pps,
+                            ClipView(t.kind, c, selected == c.id, offset, pps, tag = "clip-${t.kind}-$i",
                                 onTrim = if (editable) { l, d -> trimClip(c, l, d, onTrim, haptics) } else null,
                                 onMove = if (t.kind == "video" && t.clips.size > 1) { dxS -> onMove(c.id, reorderIndex(t.clips, i, dxS)); haptics.confirm() } else null,
                             ) { onSelect(if (selected == c.id) null else c.id) }
@@ -432,7 +433,7 @@ internal fun reorderIndex(clips: List<UiClip>, from: Int, dxS: Float): Int {
  */
 @Composable
 private fun ClipView(
-    kind: String, c: UiClip, isSel: Boolean, offset: () -> Float, pps: () -> Float,
+    kind: String, c: UiClip, isSel: Boolean, offset: () -> Float, pps: () -> Float, tag: String = "",
     onTrim: ((left: Boolean, deltaS: Float) -> Unit)? = null,
     onMove: ((dxS: Float) -> Unit)? = null,
     onClick: () -> Unit,
@@ -456,6 +457,7 @@ private fun ClipView(
                 val pl = m.measure(Constraints.fixed(w, cs.maxHeight))
                 layout(w, cs.maxHeight) { pl.place(0, 0) }
             }
+            .testTag(tag)
             .zIndex(if (isSel || dragging) 1f else 0f)
             .graphicsLayer { scaleY = 1f + 0.06f * lift; translationY = -3f * lift; alpha = if (dragging) 0.92f else 1f }
             .then(if (onMove == null) Modifier else Modifier.pointerInput(c.id) {
@@ -479,10 +481,10 @@ private fun ClipView(
         if (c.muted) Icon(Icons.Outlined.VolumeOff, null, tint = ClioColors.OnMedia, modifier = Modifier.align(Alignment.TopEnd).padding(4.dp).size(12.dp))
         if (isSel && onTrim != null) {
             val cur by rememberUpdatedState(onTrim)
-            TrimHandle(Modifier.align(Alignment.CenterStart), onDrag = { trimL = (trimL + it).coerceAtMost(c.lenS * pps() - 24f) }) {
+            TrimHandle(Modifier.align(Alignment.CenterStart).testTag("trim-left"), onDrag = { trimL = (trimL + it).coerceAtMost(c.lenS * pps() - 24f) }) {
                 val d = trimL / pps(); trimL = 0f; cur(true, d)
             }
-            TrimHandle(Modifier.align(Alignment.CenterEnd), onDrag = { trimR = (trimR + it).coerceAtLeast(-(c.lenS * pps() - 24f)) }) {
+            TrimHandle(Modifier.align(Alignment.CenterEnd).testTag("trim-right"), onDrag = { trimR = (trimR + it).coerceAtLeast(-(c.lenS * pps() - 24f)) }) {
                 val d = trimR / pps(); trimR = 0f; cur(false, d)
             }
         }
