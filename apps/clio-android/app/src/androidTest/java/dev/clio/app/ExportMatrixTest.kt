@@ -65,7 +65,9 @@ class ExportMatrixTest {
                 val uri = runBlocking { kotlinx.coroutines.withTimeout(180_000) { ex.export(snap, ExportSpec(label, 720, 1280, 30), CaptionStyle.Clean) {} } }
                 val m = MediaMetadataRetriever(); m.setDataSource(ctx, uri)
                 val d = m.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)!!.toLong()
-                val a = m.extractMetadata(MediaMetadataRetriever.METADATA_KEY_HAS_AUDIO); m.release()
+                val a = m.extractMetadata(MediaMetadataRetriever.METADATA_KEY_HAS_AUDIO)
+                val size = m.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH) + "x" + m.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT); m.release()
+                check(size == "720x1280") { "size $size" }
                 check(abs(d - snap.summary.durationMs.toLong()) <= 350) { "duration $d vs ${snap.summary.durationMs}" }
                 check(a == "yes") { "no audio" }
                 "${d}ms"
