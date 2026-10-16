@@ -94,6 +94,8 @@ private fun TextStyleEditor(t: TextItem, onStyle: (TextStyle) -> Unit, onRetime:
     val st = t.style
     Column(Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, bottom = 10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         ChipRow(TextFont.entries, st.font, { Fonts.label(it) }) { onStyle(st.copy(font = it)) }
+        // Bold is a real weight only on the variable fonts; static ones (Bebas, Pacifico) hide it.
+        if (Fonts.variable(st.font)) Choice("Negrito", st.bold) { onStyle(st.copy(bold = !st.bold)) }
         LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
             items(swatches) { c ->
                 Box(Modifier.size(24.dp).pressable { onStyle(st.copy(color = c)) }.clip(ClioShapes.pill).background(Color(c.toInt()))

@@ -61,8 +61,19 @@ object StyledText {
     }
 }
 
-private val ws = Regex("\\s+")
-internal fun String.words(): List<String> = trim().split(ws).filter { it.isNotEmpty() }
+/** Unicode White_Space, exactly as Rust's `char::is_whitespace` / `split_whitespace` (includes NBSP U+00A0, U+2007, U+202F). */
+internal fun Char.isUnicodeSpace(): Boolean = when (this) {
+    '\u0009', '\u000A', '\u000B', '\u000C', '\u000D', '\u0020', '\u0085', '\u00A0', '\u1680',
+    in '\u2000'..'\u200A', '\u2028', '\u2029', '\u202F', '\u205F', '\u3000' -> true
+    else -> false
+}
+internal fun String.words(): List<String> = split { it.isUnicodeSpace() }.filter { it.isNotEmpty() }
+
+private inline fun String.split(crossinline sep: (Char) -> Boolean): List<String> {
+    val out = ArrayList<String>(); var start = 0
+    for (i in indices) if (sep(this[i])) { out += substring(start, i); start = i + 1 }
+    out += substring(start); return out
+}
 
 /** Typefaces for [TextFont]; all bundled fonts are SIL OFL 1.1 (see assets/licenses). */
 object Fonts {
@@ -219,26 +230,49 @@ class StyledTextOverlay(
     private val painter = TextPainter(context)
     private var basePts = Long.MIN_VALUE
     private var lastScene: TextScene? = null
-    private val blank = Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888)
-    // Media3 re-uploads an overlay when the returned Bitmap *instance* changes, so two fixed-size
-    // buffers are reused alternately (no per-frame allocation); unchanged scenes return the same one.
-    private val bufH = max(2, frameH / 2)
+    private var blank: Bitmap? = null
+    // Media3 re-uploads an overlay when the returned Bitmap *instance* changes, so two buffers are
+    // reused alternately; unchanged scenes return the same one. Buffers are sized to the text block
+    // (plus room for pop/bounce overshoot), grow only when a bigger block shows up, and are freed in
+    // release() when the clip's effect chain is torn down.
     private val buffers = arrayOfNulls<Bitmap>(2)
     private var flip = 0
-    private var last: Bitmap = blank
+    private var last: Bitmap? = null
+
+    private fun blank() = blank ?: Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888).also { blank = it }
+
+    /** Height needed for [s]: block height scaled by the largest whole-block/word scale, plus bounce offset. */
+    private fun neededHeight(s: TextScene): Int {
+        val block = painter.measure(s.words, s.style, frameW, frameH)
+        val maxScale = s.scale.coerceAtLeast(1f) * (s.words.maxOfOrNull { it.scale } ?: 1f).coerceAtLeast(1f)
+        val px = s.style.size * frameH
+        val lift = (s.words.maxOfOrNull { kotlin.math.abs(it.offsetY) } ?: 0f) + kotlin.math.abs(s.offsetY)
+        // 1.4 = headroom for the spring overshoot between frames; round up to limit regrowth.
+        val h = (block * maxScale * 1.4f + 2 * lift * px + px).toInt()
+        return ((h + 63) / 64 * 64).coerceIn(64, frameH * 2)
+    }
 
     override fun getBitmap(presentationTimeUs: Long): Bitmap {
         if (basePts == Long.MIN_VALUE) basePts = presentationTimeUs
         val s = scene(clipStartMs + (presentationTimeUs - basePts) / 1000)
-        if (s == lastScene) return last
+        last?.let { if (s == lastScene) return it }
         lastScene = s
-        if (!s.visible) { last = blank; return last }
+        if (!s.visible) return blank().also { last = it }
         flip = 1 - flip
-        val bmp = buffers[flip] ?: Bitmap.createBitmap(frameW, bufH, Bitmap.Config.ARGB_8888).also { buffers[flip] = it }
+        val need = neededHeight(s)
+        val bmp = buffers[flip]?.takeIf { it.height >= need }
+            ?: Bitmap.createBitmap(frameW, maxOf(need, buffers[1 - flip]?.height ?: 0), Bitmap.Config.ARGB_8888).also { buffers[flip]?.recycle(); buffers[flip] = it }
         bmp.eraseColor(0)
-        painter.draw(Canvas(bmp), s.words, s.style, frameW, frameH, frameW / 2f, bufH / 2f, s.alpha, s.scale, s.offsetY)
+        painter.draw(Canvas(bmp), s.words, s.style, frameW, frameH, frameW / 2f, bmp.height / 2f, s.alpha, s.scale, s.offsetY)
         last = bmp
-        return last
+        return bmp
+    }
+
+    override fun release() {
+        super.release()
+        buffers.forEachIndexed { i, b -> b?.recycle(); buffers[i] = null }
+        blank?.recycle(); blank = null
+        last = null; lastScene = null
     }
 
     override fun getOverlaySettings(presentationTimeUs: Long): OverlaySettings =

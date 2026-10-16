@@ -331,14 +331,6 @@ pub fn caption_frame(caption: Caption, preset: CaptionPreset, t_ms: u64) -> Capt
     CaptionFrame { words, style, alpha: a.alpha, scale: a.scale }
 }
 
-/// Whisper language code for a device locale (e.g. "pt-BR" → "pt"); `None` lets Whisper detect.
-#[uniffi::export]
-pub fn speech_language_for_locale(tag: String) -> Option<String> {
-    let lang = tag.split(['-', '_']).next()?.to_ascii_lowercase();
-    const SUPPORTED: [&str; 12] = ["pt", "en", "es", "fr", "de", "it", "nl", "ja", "zh", "ko", "ru", "pl"];
-    SUPPORTED.contains(&lang.as_str()).then_some(lang)
-}
-
 // ---------------------------------------------------------------------------------------------
 // Project API for styled text clips
 // ---------------------------------------------------------------------------------------------
@@ -356,6 +348,16 @@ impl ClioProject {
         s.checkpoint();
         s.text_styles.insert(clip_id, style);
         Ok(())
+    }
+
+    /// Whisper language for automatic captions (ISO 639-1, e.g. "pt"); None/empty = auto-detect.
+    /// Saved in drafts; not part of undo (it is a setting, not an edit).
+    pub fn set_speech_language(&self, language: Option<String>) {
+        self.st().speech_language = language.map(|l| l.trim().to_ascii_lowercase()).filter(|l| !l.is_empty());
+    }
+
+    pub fn speech_language(&self) -> Option<String> {
+        self.st().speech_language.clone()
     }
 
     pub fn text_style(&self, clip_id: u64) -> TextStyle {
@@ -552,13 +554,6 @@ mod tests {
     }
 
     #[test]
-    fn locale_to_whisper_language() {
-        assert_eq!(speech_language_for_locale("pt-BR".into()).as_deref(), Some("pt"));
-        assert_eq!(speech_language_for_locale("pt_PT".into()).as_deref(), Some("pt"));
-        assert_eq!(speech_language_for_locale("xx".into()), None);
-    }
-
-    #[test]
     fn styles_and_timing_are_undoable_and_saved() {
         let p = ClioProject::new("t".into(), 1080, 1920).unwrap();
         let tt = p.add_track(TrackKind::Text, "T".into());
@@ -678,5 +673,23 @@ mod tests {
         assert_eq!(p.snapshot().text_styles.len(), 2);
         assert!(p.undo()); // remove undone: style back with the clip
         assert_eq!(p.text_style(z).font, TextFont::BebasNeue);
+    }
+
+    #[test]
+    fn nbsp_and_other_unicode_spaces_split_words() {
+        // Same rule as Kotlin `String.words()`: Unicode White_Space, including NBSP (U+00A0).
+        let c = Caption { start_ms: 0, end_ms: 900, text: "R$\u{a0}10\u{202f}mil\u{2009}já".into(), words: vec![] };
+        assert_eq!(effective_words(&c).iter().map(|w| w.text.as_str()).collect::<Vec<_>>(), ["R$", "10", "mil", "já"]);
+    }
+
+    #[test]
+    fn speech_language_is_saved_in_drafts() {
+        let p = ClioProject::new("t".into(), 1080, 1920).unwrap();
+        assert_eq!(p.snapshot().speech_language, None);
+        p.set_speech_language(Some(" PT ".into()));
+        let q = ClioProject::from_draft_json(p.to_draft_json().unwrap()).unwrap();
+        assert_eq!(q.speech_language().as_deref(), Some("pt"));
+        q.set_speech_language(Some(String::new()));
+        assert_eq!(q.snapshot().speech_language, None);
     }
 }

@@ -137,12 +137,13 @@ fn typewriter_counts_characters_not_bytes() {
 }
 
 #[test]
-fn locale_mapping_for_portuguese() {
-    for t in ["pt-BR", "pt_BR", "PT-br", "pt", "pt-PT"] {
-        assert_eq!(speech_language_for_locale(t.into()).as_deref(), Some("pt"), "{t}");
-    }
-    assert_eq!(speech_language_for_locale("".into()), None);
-    assert_eq!(speech_language_for_locale("xx-YY".into()), None);
+fn portuguese_speech_language_is_kept_in_drafts() {
+    // The locale mapping was removed in review (auto-detect by default); Portuguese is now an
+    // explicit, saved choice.
+    let p = ClioProject::new("t".into(), 1080, 1920).unwrap();
+    p.set_speech_language(Some("pt".into()));
+    let q = ClioProject::from_draft_json(p.to_draft_json().unwrap()).unwrap();
+    assert_eq!(q.snapshot().speech_language.as_deref(), Some("pt"));
 }
 
 #[test]

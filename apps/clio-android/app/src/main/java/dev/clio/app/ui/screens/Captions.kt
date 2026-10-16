@@ -96,11 +96,7 @@ fun CaptionsPanel(
             item { Text("Idioma da fala", style = MaterialTheme.typography.labelSmall, color = ClioColors.TextTertiary) }
             itemsIndexed(SpeechLanguages) { _, (code, label) ->
                 val sel = code == language
-                Box(Modifier.pressable { onLanguage(code) }.clip(ClioShapes.pill)
-                    .background(if (sel) ClioColors.Primary else ClioColors.SurfaceRaised)
-                    .border(1.dp, ClioColors.Hairline, ClioShapes.pill).padding(horizontal = 10.dp, vertical = 4.dp)) {
-                    Text(label, style = MaterialTheme.typography.labelSmall, color = if (sel) ClioColors.OnPrimary else ClioColors.TextSecondary)
-                }
+                Choice(label, sel) { onLanguage(code) }
             }
         }
         AnimatedVisibility(generating || status is CaptionStatus.Failed, enter = fadeIn() + expandVertically(ClioMotion.gentle()), exit = fadeOut() + shrinkVertically()) {

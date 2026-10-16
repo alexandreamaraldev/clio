@@ -125,6 +125,9 @@ struct State {
     /// When fitting, fill the empty area with a blurred copy of the frame.
     #[serde(default)]
     blur_bg: bool,
+    /// Whisper language for automatic captions (ISO 639-1); None = auto-detect.
+    #[serde(default)]
+    speech_language: Option<String>,
     /// Styles of text clips by clip id.
     #[serde(default)]
     text_styles: std::collections::BTreeMap<u64, TextStyle>,
@@ -206,6 +209,8 @@ pub struct Snapshot {
     pub tracks: Vec<Track>,
     pub captions: Vec<Caption>,
     pub text_styles: Vec<StyledText>,
+    /// Whisper language for automatic captions; None = auto-detect.
+    pub speech_language: Option<String>,
     pub can_undo: bool,
     pub can_redo: bool,
     pub fill: bool,
@@ -243,7 +248,7 @@ impl ClioProject {
                 captions: Vec::new(),
                 fill: false,
                 blur_bg: false,
-                text_styles: Default::default(), history: History::default(),
+                text_styles: Default::default(), speech_language: None, history: History::default(),
             }),
         })
     }
@@ -494,6 +499,7 @@ impl ClioProject {
             tracks: s.tracks.clone(),
             captions: s.captions.clone(),
             text_styles: s.styled_texts(),
+            speech_language: s.speech_language.clone(),
             can_undo: !s.history.undo.is_empty(),
             can_redo: !s.history.redo.is_empty(),
             fill: s.fill,

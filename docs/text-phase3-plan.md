@@ -37,7 +37,7 @@ not passed to Whisper; no caption templates.
 1. **text/rich-text-captions** (this branch) — engine `text.rs`: `TextStyle` (font, bold, size,
    colour, stroke, background, shadow, align, anim in/out), `text_anim_frame` (fade/pop/typewriter),
    `CaptionWord` on `Caption`, `caption_frame` presets (Clean/Bold/Box/Karaoke/Pop/Bounce/Highlight),
-   `edit_caption_text` re-timing, `speech_language_for_locale`, `set_text_style`/`retime_text`
+   `edit_caption_text` re-timing, a saved speech language (auto-detect by default), `set_text_style`/`retime_text`
    (undoable, in drafts). Kotlin: bundled OFL fonts, shared `TextPainter` for preview (Compose
    Canvas) and export (`BitmapOverlay`), style editor + ±0,1 s timing in `TextPanel`.
    Tests: Rust unit tests (pt-BR words, presets, edits, anims, undo/draft); Paparazzi goldens.
