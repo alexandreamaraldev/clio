@@ -85,6 +85,13 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
 
     /** Main-track transition look for the preview (see Layers.PreviewLook). */
     private val previewLook = Layers.PreviewLook()
+    /** Filter/colour grade of the clip under the playhead: one baked LUT, same effect as export. */
+    private val gradeLib by lazy { Grades.Library(app) }
+    @Volatile private var previewPlane: IntArray? = null
+    private val previewGrade = GradeLut { previewPlane ?: gradeLib.identity }
+    private var grades: Map<Long, uniffi.clio_ffi.ColorGrade> = emptyMap()
+    /** Live slider/strip value for one clip, before it is committed to the engine. */
+    private var gradeDraft: Pair<Long, uniffi.clio_ffi.ColorGrade>? = null
     /** Next picker result goes to an overlay layer instead of the main track. */
     private var pickForLayer = false
     val player: ExoPlayer = ExoPlayer.Builder(app).build().apply {
@@ -153,6 +160,8 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
             texts = s.tracks.filter { it.kind == TrackKind.TEXT }.flatMap { it.clips }.map { c -> TextItem(c.id.toLong(), c.name, c.startMs.toLong(), (c.startMs + c.durationMs).toLong(), s.textStyles.firstOrNull { it.clipId == c.id }?.style ?: StyledText.defaultStyle) },
             music = s.tracks.firstOrNull { it.kind == TrackKind.AUDIO && it.name == AudioLanes.MUSIC }?.clips?.firstOrNull()?.name,
             layers = LayersMapping.layers(getApplication(), s), cuts = LayersMapping.cuts(s))
+        grades = Grades.byClip(s.grades)
+        ui = ui.copy(grades = grades)
         Waveforms.request(getApplication(), audio.clipsOf(s))
         lastSnap = s
         if (rebuildPlayer) rebuildPlaylist(s) else refreshClipCache(s)
@@ -198,19 +207,36 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
 
     private fun updateLook(idx: Int, localMs: Long) {
         val c = videoClips.getOrNull(idx) ?: return
+        refreshGrade(c.id.toLong())
         // No FFI call (and no GL effects installed) unless this clip has a transition.
         if (!Layers.hasTransition(videoClips, idx)) { previewLook.reset(); return }
         previewLook.look = Layers.look(c, Layers.incoming(videoClips, idx), localMs)
     }
 
     /** Installs the transition GL effects only while the main track has any transition. */
-    private var effectsOn = false
+    private var effectsOn = false to false
     private fun syncPreviewEffects() {
-        val want = videoClips.indices.any { Layers.hasTransition(videoClips, it) }
-        if (want == effectsOn) return
-        effectsOn = want
+        val t = videoClips.indices.any { Layers.hasTransition(videoClips, it) }
+        val g = gradeDraft != null || videoClips.any { grades.containsKey(it.id.toLong()) }
+        if ((t to g) == effectsOn) return
+        effectsOn = t to g
         previewLook.reset()
-        player.setVideoEffects(if (want) previewLook.effects else emptyList())
+        // Colour first (the LUT), then the transition transform/fade, as in export.
+        player.setVideoEffects((if (g) listOf<androidx.media3.common.Effect>(previewGrade) else emptyList()) + (if (t) previewLook.effects else emptyList()))
+    }
+
+    private fun refreshGrade(clipId: Long) {
+        val g = gradeDraft?.takeIf { it.first == clipId }?.second ?: grades[clipId]
+        val p = if (g == null) gradeLib.identity else gradeLib.plane(g)
+        if (p !== previewPlane) previewPlane = p
+    }
+
+    /** Re-renders the paused frame so a new grade shows immediately. */
+    private fun redrawPaused() {
+        syncPreviewEffects()
+        val idx = player.currentMediaItemIndex
+        videoClips.getOrNull(idx)?.let { refreshGrade(it.id.toLong()) }
+        if (!player.isPlaying && videoClips.isNotEmpty()) player.seekTo(idx, player.currentPosition)
     }
 
     /** The media picker was dismissed without a choice. */
@@ -400,6 +426,19 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
         launchEdit { runCatching { setClipTransform(clipId.toULong(), LayersMapping.transform(t)) } }.let { }
     override fun setTransition(clipId: Long, style: TransitionStyle, durS: Float) = launchEdit(rebuildPlayer = false) {
         runCatching { setTransition(clipId.toULong(), LayersMapping.kind(style), (durS * 1000).toLong().coerceAtLeast(0).toULong()) }
+    }.let { }
+    override fun previewGrade(clipId: Long, grade: uniffi.clio_ffi.ColorGrade?) {
+        gradeDraft = grade?.let { clipId to it }
+        redrawPaused()
+    }
+    override fun setGrade(clipId: Long, grade: uniffi.clio_ffi.ColorGrade) = viewModelScope.launch {
+        apply(edit { runCatching { setClipGrade(clipId.toULong(), grade) } }, rebuildPlayer = false)
+        gradeDraft = null
+        redrawPaused()
+    }.let { }
+    override fun applyGradeToAll(clipId: Long) = viewModelScope.launch {
+        apply(edit { runCatching { applyGradeToAll(clipId.toULong()) } }, rebuildPlayer = false)
+        redrawPaused()
     }.let { }
     override fun undo() = launchEdit(rebuildPlayer = true) { undo() }.let { }
     override fun redo() = launchEdit(rebuildPlayer = true) { redo() }.let { }

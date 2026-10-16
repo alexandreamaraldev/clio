@@ -49,6 +49,7 @@ data class ExportSpec(val label: String, val width: Int, val height: Int, val fp
  */
 @OptIn(UnstableApi::class)
 class Exporter(private val context: Context) {
+    private val gradeLib by lazy { Grades.Library(context) }
     /** Diagnostics toggle used by the device QA export matrix. */
     internal var frameDrop = true
 
@@ -81,6 +82,7 @@ class Exporter(private val context: Context) {
             StyledTextItem(c.name, c.startMs.toLong(), (c.startMs + c.durationMs).toLong(), snap.textStyles.firstOrNull { it.clipId == c.id }?.style ?: StyledText.defaultStyle)
         }
         val caps = snap.captions
+        val gradeOf = Grades.byClip(snap.grades)
         val totalMs = snap.summary.durationMs.toLong()
         val blur = snap.blurBg && !snap.fill
 
@@ -110,6 +112,8 @@ class Exporter(private val context: Context) {
             // (Media3 1.4's GaussianBlurWithFrameOverlaid produced wrong output sizes / stalled on device QA.)
             // It is part of the clip: applied before the transition effects so Slide/Zoom move clip + backdrop together.
             if (blur) blurredBackdrop(c, spec.width, spec.height)?.let { video += OverlayEffect(ImmutableList.of(BitmapOverlay.createStaticBitmapOverlay(it))) }
+            // Filter + colour adjustments: the same baked LUT effect the preview uses (grades the backdrop too).
+            gradeOf[c.id.toLong()]?.let { g -> val plane = gradeLib.plane(g); video += GradeLut { plane } }
             video += Layers.exportEffects(c, incoming)
             val overlays = mutableListOf<androidx.media3.effect.TextureOverlay>()
             overlays += layerOverlays
