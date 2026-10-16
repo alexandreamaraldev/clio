@@ -160,6 +160,9 @@ class LayersE2ETest {
         compose.onNodeWithText("Exportar").performClick()
         compose.onNodeWithText("720p").performClick()
         compose.onNodeWithText("24").performClick()
+        compose.waitForIdle()
+        shot("layers-04-export-24fps")
+        compose.onNodeWithText("24 fps", substring = true).assertExists() // spec line under the choices
         val t0 = android.os.SystemClock.elapsedRealtime()
         compose.onNodeWithText("Exportar vídeo").performClick()
         compose.waitUntil(300_000) { QaHooks.export is ExportState.Done || QaHooks.export is ExportState.Failed }
