@@ -352,10 +352,11 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
     override fun editText(id: Long, text: String) = launchEdit { renameClip(id.toULong(), text) }.let { }
     override fun setTextStyle(id: Long, style: uniffi.clio_ffi.TextStyle) = launchEdit { runCatching { setTextStyle(id.toULong(), style) } }.let { }
     override fun retimeCaption(index: Int, startMs: Long, endMs: Long) = launchEdit {
-        Engine.retimeCaption(this, index, startMs, endMs).onFailure { android.util.Log.w("Clio", "retimeCaption($index, $startMs, $endMs) failed", it) }
+        val (s0, e0) = TextRetime.window(startMs, endMs)
+        Engine.retimeCaption(this, index, s0, e0).onFailure { android.util.Log.w("Clio", "retimeCaption($index, $startMs, $endMs) failed", it) }
     }.let { }
     override fun retimeText(id: Long, startMs: Long, endMs: Long) =
-        launchEdit { runCatching { retimeText(id.toULong(), startMs.coerceAtLeast(0).toULong(), (endMs - startMs).coerceAtLeast(1).toULong()) } }.let { }
+        launchEdit { val (s0, e0) = TextRetime.window(startMs, endMs); runCatching { retimeText(id.toULong(), s0.toULong(), (e0 - s0).toULong()) } }.let { }
 
     // --- Music ---
     override fun pickMusic() { _events.tryEmit(EditorEvent.PickMusic) }
@@ -478,4 +479,17 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
 object QaHooks {
     @Volatile var ui: EditorUi? = null
     @Volatile var export: ExportState? = null
+}
+
+
+/**
+ * Final guard before the unsigned engine calls: the duration is always computed from the clamped
+ * start, so a window that slipped below 0 s is shifted (length kept), never collapsed to the minimum.
+ */
+internal object TextRetime {
+    fun window(startMs: Long, endMs: Long): Pair<Long, Long> {
+        val len = (endMs - startMs).coerceAtLeast(1)
+        val s = startMs.coerceAtLeast(0)
+        return s to s + len
+    }
 }

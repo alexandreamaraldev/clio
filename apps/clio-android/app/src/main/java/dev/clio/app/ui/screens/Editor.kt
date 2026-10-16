@@ -1,5 +1,9 @@
 package dev.clio.app.ui.screens
 
+import androidx.compose.ui.semantics.CustomAccessibilityAction
+import androidx.compose.ui.semantics.customActions
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.Canvas
@@ -52,6 +56,7 @@ import kotlin.math.abs
 import kotlin.math.ceil
 import kotlin.math.floor
 import kotlin.math.roundToInt
+import kotlin.math.roundToLong
 
 private data class Tool(val icon: ImageVector, val label: String, val ready: Boolean = true)
 private val tools = listOf(
@@ -245,7 +250,13 @@ fun EditorScreen(
                 }
                 TOOL_FORMAT -> FormatPanel(ui.canvasW, ui.canvasH, ui.fill, ui.blurBg, actions::setAspect, actions::setFraming)
                 else -> Timeline(ui.tracks, ui.durationS, playhead, ui.playing, selectedClip, { selectedClip = it }, actions::scrub, actions::addClip,
-                    onTrim = actions::trim, onMove = actions::move)
+                    onTrim = actions::trim, onMove = actions::move,
+                    onRetime = { id, startS, lenS ->
+                        val a = (startS * 1000.0).roundToLong(); val b = ((startS + lenS) * 1000.0).roundToLong()
+                        // Caption cues are shown with ids -1-index; text clips use their engine id. The engine clamps
+                        // (neighbours, [0, duration], 100 ms minimum) and records one undo step per change.
+                        if (id >= 0) actions.retimeText(id, a, b) else actions.retimeCaption((-1 - id).toInt(), a, b)
+                    })
             }
         }
 
@@ -310,6 +321,8 @@ fun Timeline(
     onAdd: () -> Unit = {},
     onTrim: (id: Long, inS: Float, lenS: Float) -> Unit = { _, _, _ -> },
     onMove: (id: Long, toIndex: Int) -> Unit = { _, _ -> },
+    /** Text/caption timing: new start and length in seconds. */
+    onRetime: (id: Long, startS: Float, lenS: Float) -> Unit = { _, _, _ -> },
 ) {
     val haptics = rememberHaptics()
     val density = LocalDensity.current
@@ -389,13 +402,23 @@ fun Timeline(
             }
             Spacer(Modifier.height(6.dp))
             tracks.forEach { t ->
-                Box(Modifier.fillMaxWidth().height(if (t.kind == "video") 56.dp else 36.dp).padding(vertical = 3.dp)) {
+                Box(Modifier.fillMaxWidth().height(when (t.kind) { "video" -> 56.dp; "text" -> 54.dp; else -> 36.dp }).padding(vertical = 3.dp)) {
                     val editable = t.kind == "video" || t.kind == "audio"
+                    val isText = t.kind == "text"
                     t.clips.forEachIndexed { i, c ->
                         key(c.id) {
+                            val anchors = { listOf(playhead()) + tracks.flatMap { it.clips }.filter { it.id != c.id }.flatMap { listOf(it.startS, it.startS + it.lenS) } }
                             ClipView(t.kind, c, selected == c.id, offset, pps, tag = "clip-${t.kind}-$i",
-                                onTrim = if (editable) { l, d -> trimClip(c, l, d, onTrim, haptics) } else null,
-                                onMove = if (t.kind == "video" && t.clips.size > 1) { dxS -> onMove(c.id, reorderIndex(t.clips, i, dxS)); haptics.confirm() } else null,
+                                onTrim = when {
+                                    editable -> { l, d -> trimClip(c, l, d, onTrim, haptics) }
+                                    isText -> { l, d -> retimeEdge(c, l, d, anchors(), onRetime, haptics) }
+                                    else -> null
+                                },
+                                onMove = when {
+                                    t.kind == "video" && t.clips.size > 1 -> { dxS -> onMove(c.id, reorderIndex(t.clips, i, dxS)); haptics.confirm() }
+                                    isText -> { dxS -> moveText(c, dxS, anchors(), onRetime, haptics) }
+                                    else -> null
+                                },
                             ) { onSelect(if (selected == c.id) null else c.id) }
                         }
                     }
@@ -427,6 +450,16 @@ private fun trimClip(c: UiClip, left: Boolean, deltaS: Float, onTrim: (Long, Flo
     if (inS != c.inS || lenS != c.lenS) { onTrim(c.id, inS, lenS); haptics.tick() }
 }
 
+private fun retimeEdge(c: UiClip, left: Boolean, deltaS: Float, anchors: List<Float>, onRetime: (Long, Float, Float) -> Unit, haptics: Haptics) {
+    val (s, l) = TextHandles.trim(c.startS, c.lenS, left, deltaS, anchors + TextHandles.ownEdges(c.startS, c.lenS))
+    if (s != c.startS || l != c.lenS) { onRetime(c.id, s, l); haptics.tick() }
+}
+
+private fun moveText(c: UiClip, deltaS: Float, anchors: List<Float>, onRetime: (Long, Float, Float) -> Unit, haptics: Haptics) {
+    val s = TextHandles.move(c.startS, c.lenS, deltaS, anchors + TextHandles.ownEdges(c.startS, c.lenS))
+    if (s != c.startS) { onRetime(c.id, s, c.lenS); haptics.confirm() }
+}
+
 /** Where a clip dragged by [dxS] seconds lands: the slot whose midpoint its centre passes. */
 internal fun reorderIndex(clips: List<UiClip>, from: Int, dxS: Float): Int {
     val c = clips[from]
@@ -436,9 +469,9 @@ internal fun reorderIndex(clips: List<UiClip>, from: Int, dxS: Float): Int {
 }
 
 /**
- * One clip. Tap selects (it lifts on a spring). When selected, video/audio clips show trim handles
+ * One clip. Tap selects (it lifts on a spring). When selected, video/audio/text clips show trim handles
  * (drag either edge, snapped to frames, committed on release). Long-press then drag reorders
- * clips on the main track.
+ * clips on the main track, or retimes a text/caption clip.
  */
 @Composable
 private fun ClipView(
@@ -476,6 +509,12 @@ private fun ClipView(
                     onDragCancel = { dragging = false; dragX = 0f },
                 ) { ch, amount -> ch.consume(); dragX += amount.x }
             })
+            .then(if (kind == "text" && onMove != null) Modifier.semantics {
+                customActions = listOf(
+                    CustomAccessibilityAction("Mover para a esquerda") { curMove?.invoke(-NUDGE_S); true },
+                    CustomAccessibilityAction("Mover para a direita") { curMove?.invoke(NUDGE_S); true },
+                )
+            } else Modifier)
             .pressable(onClick = onClick)
             .clip(ClioShapes.sm)
             .background(tint)
@@ -490,10 +529,20 @@ private fun ClipView(
         if (c.muted) Icon(Icons.Outlined.VolumeOff, null, tint = ClioColors.OnMedia, modifier = Modifier.align(Alignment.TopEnd).padding(4.dp).size(12.dp))
         if (isSel && onTrim != null) {
             val cur by rememberUpdatedState(onTrim)
-            TrimHandle(Modifier.align(Alignment.CenterStart).testTag("trim-left"), onDrag = { trimL = (trimL + it).coerceAtMost(c.lenS * pps() - 24f) }) {
+            val density = LocalDensity.current
+            // Text clips: 48 dp touch targets, shrunk on short clips so a 32 dp middle stays free for
+            // the long-press move (never below the 12 dp bar).
+            val touch = if (kind == "text") with(density) {
+                ((c.lenS * pps() - gap - 32.dp.toPx()) / 2).coerceIn(12.dp.toPx(), 48.dp.toPx()).toDp()
+            } else 12.dp
+            val name = c.label.removePrefix("Aa").trim()
+            val a11y = kind == "text"
+            TrimHandle(Modifier.align(Alignment.CenterStart).testTag("trim-left"), onDrag = { trimL = (trimL + it).coerceAtMost(c.lenS * pps() - 24f) },
+                left = true, touchW = touch, a11y = if (a11y) "Início de $name" else null, onNudge = if (a11y) { d -> cur(true, d) } else null) {
                 val d = trimL / pps(); trimL = 0f; cur(true, d)
             }
-            TrimHandle(Modifier.align(Alignment.CenterEnd).testTag("trim-right"), onDrag = { trimR = (trimR + it).coerceAtLeast(-(c.lenS * pps() - 24f)) }) {
+            TrimHandle(Modifier.align(Alignment.CenterEnd).testTag("trim-right"), onDrag = { trimR = (trimR + it).coerceAtLeast(-(c.lenS * pps() - 24f)) },
+                left = false, touchW = touch, a11y = if (a11y) "Fim de $name" else null, onNudge = if (a11y) { d -> cur(false, d) } else null) {
                 val d = trimR / pps(); trimR = 0f; cur(false, d)
             }
         }
@@ -501,11 +550,23 @@ private fun ClipView(
 }
 
 @Composable
-private fun TrimHandle(modifier: Modifier, onDrag: (Float) -> Unit, onEnd: () -> Unit) {
+private fun TrimHandle(
+    modifier: Modifier, onDrag: (Float) -> Unit,
+    left: Boolean = true, touchW: androidx.compose.ui.unit.Dp = 12.dp, a11y: String? = null, onNudge: ((Float) -> Unit)? = null,
+    onEnd: () -> Unit,
+) {
     var active by remember { mutableStateOf(false) }
     val w by animateDpAsState(if (active) 16.dp else 12.dp, ClioMotion.snappy(), label = "h")
+    // Touch area is wider than the bar (up to 48 dp, never past half the clip so the two never overlap).
     Box(
-        modifier.fillMaxHeight().width(w).background(ClioColors.Clay)
+        modifier.fillMaxHeight().width(maxOf(touchW, w))
+            .then(if (a11y == null) Modifier else Modifier.semantics {
+                contentDescription = a11y
+                if (onNudge != null) customActions = listOf(
+                    CustomAccessibilityAction("Adiantar 0,1 s") { onNudge(-NUDGE_S); true },
+                    CustomAccessibilityAction("Atrasar 0,1 s") { onNudge(NUDGE_S); true },
+                )
+            })
             .pointerInput(Unit) {
                 detectHorizontalDragGestures(
                     onDragStart = { active = true },
@@ -513,9 +574,16 @@ private fun TrimHandle(modifier: Modifier, onDrag: (Float) -> Unit, onEnd: () ->
                     onDragCancel = { active = false; onEnd() },
                 ) { ch, dx -> ch.consume(); onDrag(dx) }
             },
-        contentAlignment = Alignment.Center,
-    ) { Box(Modifier.width(2.dp).height(14.dp).clip(ClioShapes.pill).background(ClioColors.OnMedia)) }
+        contentAlignment = if (left) Alignment.CenterStart else Alignment.CenterEnd,
+    ) {
+        Box(Modifier.fillMaxHeight().width(w).background(ClioColors.Clay), contentAlignment = Alignment.Center) {
+            Box(Modifier.width(2.dp).height(14.dp).clip(ClioShapes.pill).background(ClioColors.OnMedia))
+        }
+    }
 }
+
+/** TalkBack nudge step for text/caption handles and moves. */
+private const val NUDGE_S = 0.1f
 
 /** Blurred, enlarged frame of the current clip behind a fitted preview (API 31+ blur; dimmed fallback). */
 @Composable
