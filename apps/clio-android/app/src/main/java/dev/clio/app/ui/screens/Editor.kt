@@ -231,8 +231,9 @@ fun EditorScreen(
                     onTrim = actions::trim, onMove = actions::move,
                     onRetime = { id, startS, lenS ->
                         val a = (startS * 1000).roundToInt().toLong(); val b = ((startS + lenS) * 1000).roundToInt().toLong()
-                        // Caption cues are shown with ids -1-index; text clips use their engine id.
-                        if (id >= 0) actions.retimeText(id, a, b) else actions.editCaptions(TextHandles.retimeCaption(ui.captions, (-1 - id).toInt(), a, b))
+                        // Caption cues are shown with ids -1-index; text clips use their engine id. The engine clamps
+                        // (neighbours, [0, duration], 100 ms minimum) and records one undo step per change.
+                        if (id >= 0) actions.retimeText(id, a, b) else actions.retimeCaption((-1 - id).toInt(), a, b)
                     })
             }
         }
