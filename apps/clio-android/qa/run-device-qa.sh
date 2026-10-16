@@ -11,6 +11,20 @@ mkdir -p "$OUT/screens" "$OUT/screenrecord"
 : > "$OUT/results.txt"
 
 adb wait-for-device
+# Boot fully, then unlock and clear anything covering the app (keyguard, ANR/system dialogs).
+for i in $(seq 1 90); do [ "$(adb shell getprop sys.boot_completed | tr -d '\r')" = 1 ] && break; sleep 2; done
+until adb shell pm path android > /dev/null 2>&1; do sleep 2; done
+unblock() {
+  adb shell input keyevent KEYCODE_WAKEUP; adb shell wm dismiss-keyguard; adb shell input keyevent 82
+  adb shell am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS > /dev/null
+  adb shell settings put secure immersive_mode_confirmations confirmed
+  adb shell settings put global hidden_api_policy 1 > /dev/null 2>&1 || true
+}
+adb shell svc power stayon true
+adb shell settings put system screen_off_timeout 1800000
+adb shell settings put global anr_show_background 0 2>/dev/null || true
+sleep 20   # let the launcher and system apps settle (early ANR dialogs come from here)
+unblock
 adb shell settings put global window_animation_scale 0
 adb shell settings put global transition_animation_scale 0
 adb shell settings put global animator_duration_scale 0
@@ -26,8 +40,9 @@ REC=$!
 fail=0
 for t in "${TESTS[@]}"; do
   adb shell pm clear $PKG > /dev/null   # fresh drafts/prefs for every test
+  unblock
   echo "::group::$t"
-  adb shell am instrument -w -e class "$PKG.$t" $RUNNER | tee "$OUT/${t//#/_}.txt"
+  timeout 1200 adb shell am instrument -w -e class "$PKG.$t" $RUNNER | tee "$OUT/${t//#/_}.txt"
   echo "::endgroup::"
   if grep -q "^OK (1 test)" "$OUT/${t//#/_}.txt"; then echo "PASS $t" >> "$OUT/results.txt"; else echo "FAIL $t" >> "$OUT/results.txt"; fail=1; fi
 done

@@ -98,6 +98,8 @@ data class EditorUi(
     val texts: List<TextItem> = emptyList(),
     val music: String? = null,
     val captionStyle: CaptionStyle = CaptionStyle.Clean,
+    /** Whisper language; null = auto-detect. */
+    val captionLanguage: String? = null,
 )
 
 interface EditorActions {
@@ -113,11 +115,14 @@ interface EditorActions {
     fun generateCaptions() {}
     fun toggleFill() {}
     fun setCaptionStyle(style: CaptionStyle) {}
+    fun setCaptionLanguage(language: String?) {}
     fun addText() {}
     fun editText(id: Long, text: String) {}
     fun setTextStyle(id: Long, style: uniffi.clio_ffi.TextStyle) {}
     /** Timing handles for text clips (start/end in ms). */
     fun retimeText(id: Long, startMs: Long, endMs: Long) {}
+    /** Timing handles for caption cue `index` (UI clip id `-1 - index`); clamped by the engine. */
+    fun retimeCaption(index: Int, startMs: Long, endMs: Long) {}
     fun pickMusic() {}
     fun removeMusic() {}
     fun editCaptions(caps: List<Engine.Cap>) {}
@@ -216,7 +221,7 @@ fun EditorScreen(
             (fadeIn(ClioMotion.fade()) + slideInVertically(ClioMotion.slide) { it / 8 }) togetherWith fadeOut(ClioMotion.fade(140))
         }, label = "panel") { panel ->
             when (panel) {
-                TOOL_CAPTIONS -> CaptionsPanel(ui.captions, capStyle, ui.captionStatus, actions::setCaptionStyle, actions::generateCaptions, actions::editCaptions)
+                TOOL_CAPTIONS -> CaptionsPanel(ui.captions, capStyle, ui.captionStatus, actions::setCaptionStyle, actions::generateCaptions, actions::editCaptions, ui.captionLanguage, actions::setCaptionLanguage)
                 TOOL_TEXT -> TextPanel(ui.texts, actions::addText, actions::editText, actions::setTextStyle, actions::retimeText)
                 TOOL_MUSIC -> MusicPanel(ui.music, actions::pickMusic, actions::removeMusic)
                 TOOL_SPEED -> SpeedPanel(target) { actions.setSpeed(target?.id, it) }

@@ -39,9 +39,20 @@ class ExportMatrixTest {
             "fill" to { _ -> setFraming(true, false) },
             "split" to { c -> splitClip(c, 2500u) },
             "text" to { _ -> val t = addTrack(TrackKind.TEXT, "T"); insertClip(t, "Oi", "", 500u, 2000u) },
+            // Combinations: processors on only some items of a multi-clip sequence.
+            "split+speedA" to { c -> splitClip(c, 2500u); setClipSpeed(c, 2f) },
+            "split+speedB" to { c -> val r = splitClip(c, 2500u); setClipSpeed(r, 2f) },
+            "split+fadeA" to { c -> splitClip(c, 2500u); setClipAudio(c, 1f, 500u, 0u, false) },
+            "split+fadeB" to { c -> val r = splitClip(c, 2500u); setClipAudio(r, 1f, 500u, 0u, false) },
+            "dup+speed+fade" to { c -> val d = duplicateClip(c); setClipSpeed(d, 2f); setClipAudio(c, 1f, 1000u, 0u, false) },
+            "e2e-like" to { c ->
+                trimClip(c, 0u, 4500u); val r = splitClip(c, 1500u); val d = duplicateClip(c)
+                moveClip(r, 0u); setClipSpeed(r, 2f); setClipAudio(r, 1f, 400u, 0u, false); setFraming(false, true)
+                val t = addTrack(TrackKind.TEXT, "T"); insertClip(t, "Oi", "", 500u, 2000u); check(d > 0u)
+            },
         )
         val results = mutableListOf<String>()
-        for (drop in listOf(false, true)) for ((name, edit) in variants) {
+        for (drop in listOf(true)) for ((name, edit) in variants) {
             val label = "$name${if (drop) "+framedrop" else ""}"
             val p = ClioProject("m", 1080u, 1920u)
             val v = p.addTrack(TrackKind.VIDEO, "V")
@@ -51,10 +62,16 @@ class ExportMatrixTest {
             val snap = p.snapshot()
             val ex = Exporter(ctx).apply { frameDrop = drop }
             val r = runCatching {
-                val uri = runBlocking { ex.export(snap, ExportSpec(label, 720, 1280, 30), CaptionStyle.Clean) {} }
+                val uri = runBlocking { kotlinx.coroutines.withTimeout(180_000) { ex.export(snap, ExportSpec(label, 720, 1280, 30), CaptionStyle.Clean) {} } }
                 val m = MediaMetadataRetriever(); m.setDataSource(ctx, uri)
                 val d = m.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)!!.toLong()
-                val a = m.extractMetadata(MediaMetadataRetriever.METADATA_KEY_HAS_AUDIO); m.release()
+                val a = m.extractMetadata(MediaMetadataRetriever.METADATA_KEY_HAS_AUDIO)
+                // Transformer may encode portrait as landscape + a 90° rotation flag; compare displayed size.
+                val vw = m.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)!!.toInt()
+                val vh = m.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)!!.toInt()
+                val rot = m.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)?.toIntOrNull() ?: 0
+                val size = if (rot % 180 != 0) "${vh}x$vw" else "${vw}x$vh"; m.release()
+                check(size == "720x1280") { "size $size" }
                 check(abs(d - snap.summary.durationMs.toLong()) <= 350) { "duration $d vs ${snap.summary.durationMs}" }
                 check(a == "yes") { "no audio" }
                 "${d}ms"

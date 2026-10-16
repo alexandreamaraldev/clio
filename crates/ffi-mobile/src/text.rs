@@ -5,6 +5,8 @@
 //! paints what [`text_anim_frame`] / [`caption_frame`] return, with the same painter for the
 //! Media3 preview and the Media3 export, so both always match.
 
+use unicode_segmentation::UnicodeSegmentation;
+
 use crate::{Caption, ClioError, ClioProject, TrackKind, MIN_CLIP_MS};
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
@@ -71,8 +73,9 @@ impl Default for TextStyle {
 
 impl TextStyle {
     fn clamped(mut self) -> Self {
-        self.size = self.size.clamp(0.01, 0.2);
-        self.stroke_width = self.stroke_width.clamp(0.0, 0.3);
+        let d = TextStyle::default();
+        self.size = if self.size.is_finite() { self.size.clamp(0.01, 0.2) } else { d.size };
+        self.stroke_width = if self.stroke_width.is_finite() { self.stroke_width.clamp(0.0, 0.3) } else { 0.0 };
         self.anim_ms = self.anim_ms.clamp(0, 2000);
         self
     }
@@ -97,7 +100,8 @@ pub struct AnimFrame {
     pub scale: f32,
     /// Vertical offset as a fraction of the text size (positive = down).
     pub offset_y: f32,
-    /// Characters (Unicode scalar values) to show; equal to the text length when fully shown.
+    /// Unicode scalar values to show, always at a grapheme-cluster boundary (never splits a letter
+    /// from its combining accent); equal to the text length when fully shown.
     pub visible_chars: u32,
 }
 
@@ -109,11 +113,22 @@ fn spring(p: f32) -> f32 {
     1.0 - (-6.0 * p).exp() * (9.0 * p).cos()
 }
 
+/// Visible units for the typewriter are extended grapheme clusters, so NFD "ç" ("c" + U+0327)
+/// or an emoji with modifiers is revealed as one letter.
+fn clusters(text: &str) -> u32 {
+    text.graphemes(true).count() as u32
+}
+
+/// Unicode scalar values covering the first `n` grapheme clusters (always a cluster boundary).
+fn cluster_prefix(text: &str, n: u32) -> u32 {
+    text.graphemes(true).take(n as usize).map(|g| g.chars().count() as u32).sum()
+}
+
 fn ease_out(p: f32) -> f32 {
     1.0 - (1.0 - p).powi(3)
 }
 
-fn apply_anim(a: TextAnim, p: f32, chars: u32, f: &mut AnimFrame) {
+fn apply_anim(a: TextAnim, p: f32, text: &str, f: &mut AnimFrame) {
     let p = p.clamp(0.0, 1.0);
     match a {
         TextAnim::None => {}
@@ -125,7 +140,7 @@ fn apply_anim(a: TextAnim, p: f32, chars: u32, f: &mut AnimFrame) {
             f.alpha *= (p * 3.0).min(1.0);
             f.scale *= 0.6 + 0.4 * spring(p);
         }
-        TextAnim::Typewriter => f.visible_chars = f.visible_chars.min((chars as f32 * p).ceil() as u32),
+        TextAnim::Typewriter => f.visible_chars = f.visible_chars.min(cluster_prefix(text, (clusters(text) as f32 * p).ceil() as u32)),
     }
 }
 
@@ -140,10 +155,10 @@ pub fn text_anim_frame(style: TextStyle, text: String, local_ms: u64, duration_m
         f.alpha = 0.0;
         return f;
     }
-    apply_anim(style.anim_in, local_ms as f32 / len, chars, &mut f);
+    apply_anim(style.anim_in, local_ms as f32 / len, &text, &mut f);
     let left = (duration_ms - local_ms) as f32;
     if left < len {
-        apply_anim(style.anim_out, left / len, chars, &mut f);
+        apply_anim(style.anim_out, left / len, &text, &mut f);
     }
     f
 }
@@ -316,14 +331,6 @@ pub fn caption_frame(caption: Caption, preset: CaptionPreset, t_ms: u64) -> Capt
     CaptionFrame { words, style, alpha: a.alpha, scale: a.scale }
 }
 
-/// Whisper language code for a device locale (e.g. "pt-BR" → "pt"); `None` lets Whisper detect.
-#[uniffi::export]
-pub fn speech_language_for_locale(tag: String) -> Option<String> {
-    let lang = tag.split(['-', '_']).next()?.to_ascii_lowercase();
-    const SUPPORTED: [&str; 12] = ["pt", "en", "es", "fr", "de", "it", "nl", "ja", "zh", "ko", "ru", "pl"];
-    SUPPORTED.contains(&lang.as_str()).then_some(lang)
-}
-
 // ---------------------------------------------------------------------------------------------
 // Project API for styled text clips
 // ---------------------------------------------------------------------------------------------
@@ -343,34 +350,129 @@ impl ClioProject {
         Ok(())
     }
 
+    /// Whisper language for automatic captions (ISO 639-1, e.g. "pt"); None/empty = auto-detect.
+    /// Saved in drafts; not part of undo (it is a setting, not an edit).
+    pub fn set_speech_language(&self, language: Option<String>) {
+        self.st().speech_language = language.map(|l| l.trim().to_ascii_lowercase()).filter(|l| !l.is_empty());
+    }
+
+    pub fn speech_language(&self) -> Option<String> {
+        self.st().speech_language.clone()
+    }
+
     pub fn text_style(&self, clip_id: u64) -> TextStyle {
         self.st().text_styles.get(&clip_id).cloned().unwrap_or_default()
     }
 
-    /// Moves/resizes a text clip on the timeline (timing handles). Text clips are free-floating.
+    /// Moves/resizes a text clip on the timeline (timing handles). See [`clamp_span`] for the
+    /// rules: kept inside [0, video duration], never overlaps the other clips on its track (the
+    /// dragged edge stops at the neighbour's edge), at least [`MIN_CLIP_MS`] long. Undoable.
     pub fn retime_text(&self, clip_id: u64, start_ms: u64, duration_ms: u64) -> Result<(), ClioError> {
         let mut s = self.st();
         let (ti, ci) = s.text_clip(clip_id)?;
-        let duration_ms = duration_ms.max(MIN_CLIP_MS);
         let c = &s.tracks[ti].clips[ci];
-        if c.start_ms == start_ms && c.duration_ms == duration_ms {
+        let old = (c.start_ms, c.start_ms + c.duration_ms);
+        let others = s.tracks[ti].clips.iter().filter(|o| o.id != clip_id).map(|o| (o.start_ms, o.start_ms + o.duration_ms));
+        let (lo, hi) = neighbours(old, others, s.video_end());
+        let (a, b) = clamp_span(old, (start_ms, start_ms.saturating_add(duration_ms)), lo, hi);
+        if (a, b) == old {
             return Ok(());
         }
         s.checkpoint();
         let c = &mut s.tracks[ti].clips[ci];
-        c.start_ms = start_ms;
-        c.duration_ms = duration_ms;
+        c.start_ms = a;
+        c.duration_ms = b - a;
         s.relayout(ti);
         Ok(())
     }
+
+    /// Moves/resizes caption cue `index` (position in `captions()`), with the same rules as
+    /// [`ClioProject::retime_text`] against the neighbouring cues. Word timings are rescaled
+    /// proportionally into the new span. Undoable. Returns the updated cue.
+    pub fn retime_caption(&self, index: u32, start_ms: u64, end_ms: u64) -> Result<Caption, ClioError> {
+        let mut s = self.st();
+        let i = index as usize;
+        let c = s.captions.get(i).cloned().ok_or_else(|| ClioError::Invalid { msg: format!("no caption {index}") })?;
+        let old = (c.start_ms, c.end_ms);
+        let others = s.captions.iter().enumerate().filter(|(j, _)| *j != i).map(|(_, o)| (o.start_ms, o.end_ms));
+        let (lo, hi) = neighbours(old, others, s.video_end());
+        let (a, b) = clamp_span(old, (start_ms, end_ms.max(start_ms)), lo, hi);
+        if (a, b) == old {
+            return Ok(c);
+        }
+        let words = effective_words(&c);
+        let span = old.1.saturating_sub(old.0).max(1) as f64;
+        let map = |t: u64| a + ((t.saturating_sub(old.0)) as f64 / span * (b - a) as f64).round() as u64;
+        let words = words.into_iter().map(|w| CaptionWord { start_ms: map(w.start_ms).min(b), end_ms: map(w.end_ms).min(b), ..w }).collect();
+        let nc = Caption { start_ms: a, end_ms: b, words, ..c };
+        s.checkpoint();
+        s.captions[i] = nc.clone();
+        Ok(nc)
+    }
+}
+
+/// Free room around `cur` given the other spans on the same track: (end of the previous one,
+/// start of the next one), bounded by [0, `end`] (`end` = video duration; 0 = no video, unbounded).
+fn neighbours(cur: (u64, u64), others: impl Iterator<Item = (u64, u64)>, end: u64) -> (u64, u64) {
+    let hi = if end == 0 { u64::MAX / 2 } else { end };
+    let mut lo = 0;
+    let mut up = hi;
+    for (s, e) in others {
+        if s < cur.0 || (s == cur.0 && e <= cur.0) {
+            lo = lo.max(e.min(cur.0));
+        } else {
+            up = up.min(s.max(cur.1));
+        }
+    }
+    (lo, up.max(lo))
+}
+
+/// Timing-handle rules shared by text clips and caption cues.
+///
+/// * Moving (same length): the span slides but stops at the free room's edges (`lo`..`hi`).
+/// * Dragging one edge: that edge stops at the neighbour's edge (or 0 / video end), and the
+///   span never gets shorter than [`MIN_CLIP_MS`] (the dragged edge stops early instead).
+/// * If the free room itself is shorter than the minimum, the span fills the room.
+pub fn clamp_span(old: (u64, u64), new: (u64, u64), lo: u64, hi: u64) -> (u64, u64) {
+    let min = MIN_CLIP_MS;
+    if hi.saturating_sub(lo) <= min {
+        return (lo, hi);
+    }
+    let (ns, ne) = (new.0, new.1.max(new.0));
+    if ns != old.0 && ne != old.1 && ne - ns == old.1 - old.0 {
+        let len = (ne - ns).clamp(min, hi - lo);
+        let a = ns.clamp(lo, hi - len);
+        return (a, a + len);
+    }
+    // Start-edge drag: the start stops `min` before the (fixed) end. Otherwise the start is
+    // honoured and the end is pushed to keep the minimum length.
+    let cap = if ne == old.1 { ne.min(hi).saturating_sub(min).max(lo) } else { hi - min };
+    let a = ns.clamp(lo, cap);
+    let b = ne.clamp(a + min, hi);
+    (a, b)
 }
 
 impl crate::State {
+    /// Programme length (end of the video track); 0 when there is no video yet.
+    fn video_end(&self) -> u64 {
+        self.tracks.iter().filter(|t| t.kind == TrackKind::Video).flat_map(|t| t.clips.iter().map(|c| c.start_ms + c.duration_ms)).max().unwrap_or(0)
+    }
     fn text_clip(&self, clip_id: u64) -> Result<(usize, usize), ClioError> {
         match self.find(clip_id) {
             Some((ti, ci)) if self.tracks[ti].kind == TrackKind::Text => Ok((ti, ci)),
             _ => Err(ClioError::Invalid { msg: format!("not a text clip: {clip_id}") }),
         }
+    }
+    /// Split/duplicate: the new clip inherits the source clip's style.
+    pub(crate) fn copy_text_style(&mut self, from: u64, to: u64) {
+        if let Some(st) = self.text_styles.get(&from).cloned() {
+            self.text_styles.insert(to, st);
+        }
+    }
+    /// Drops styles of clips that no longer exist (deleted clips; undo restores them with the snapshot).
+    pub(crate) fn prune_text_styles(&mut self) {
+        let live: std::collections::BTreeSet<u64> = self.tracks.iter().flat_map(|t| t.clips.iter().map(|c| c.id)).collect();
+        self.text_styles.retain(|id, _| live.contains(id));
     }
     pub(crate) fn styled_texts(&self) -> Vec<StyledText> {
         self.text_styles.iter().filter(|(id, _)| self.find(**id).is_some()).map(|(id, s)| StyledText { clip_id: *id, style: s.clone() }).collect()
@@ -452,13 +554,6 @@ mod tests {
     }
 
     #[test]
-    fn locale_to_whisper_language() {
-        assert_eq!(speech_language_for_locale("pt-BR".into()).as_deref(), Some("pt"));
-        assert_eq!(speech_language_for_locale("pt_PT".into()).as_deref(), Some("pt"));
-        assert_eq!(speech_language_for_locale("xx".into()), None);
-    }
-
-    #[test]
     fn styles_and_timing_are_undoable_and_saved() {
         let p = ClioProject::new("t".into(), 1080, 1920).unwrap();
         let tt = p.add_track(TrackKind::Text, "T".into());
@@ -469,7 +564,7 @@ mod tests {
         p.retime_text(x, 1200, 50).unwrap();
         let snap = p.snapshot();
         let c = &snap.tracks.iter().find(|t| t.id == tt).unwrap().clips[0];
-        assert_eq!((c.start_ms, c.duration_ms), (1200, MIN_CLIP_MS));
+        assert_eq!((c.start_ms, c.duration_ms), (1200, MIN_CLIP_MS)); // start honoured, end pushed to the minimum
         assert_eq!(p.snapshot().text_styles.len(), 1);
         let q = ClioProject::from_draft_json(p.to_draft_json().unwrap()).unwrap();
         assert_eq!(q.text_style(x).font, TextFont::Pacifico);
@@ -480,5 +575,121 @@ mod tests {
         let v = p.add_track(TrackKind::Video, "V".into());
         let vc = p.append_clip(v, "a".into(), "a.mp4".into(), 1000).unwrap();
         assert!(p.retime_text(vc, 0, 500).is_err());
+    }
+
+    fn text_span(p: &ClioProject, id: u64) -> (u64, u64) {
+        let c = p.snapshot().tracks.into_iter().flat_map(|t| t.clips).find(|c| c.id == id).unwrap();
+        (c.start_ms, c.start_ms + c.duration_ms)
+    }
+
+    #[test]
+    fn retime_text_clamps_to_video_and_neighbours() {
+        let p = ClioProject::new("t".into(), 1080, 1920).unwrap();
+        let v = p.add_track(TrackKind::Video, "V".into());
+        p.append_clip(v, "a".into(), "a.mp4".into(), 10_000).unwrap();
+        let tt = p.add_track(TrackKind::Text, "T".into());
+        let a = p.insert_clip(tt, "A".into(), String::new(), 1000, 2000).unwrap(); // 1000..3000
+        let b = p.insert_clip(tt, "B".into(), String::new(), 5000, 2000).unwrap(); // 5000..7000
+                                                                                   // End edge of A dragged into B stops at B's start.
+        p.retime_text(a, 1000, 6000).unwrap();
+        assert_eq!(text_span(&p, a), (1000, 5000));
+        // Start edge of B dragged left into A stops at A's end.
+        p.retime_text(b, 2000, 5000).unwrap();
+        assert_eq!(text_span(&p, b), (5000, 7000));
+        // End past the video stops at the video end; start before 0 stops at 0.
+        p.retime_text(b, 5000, 9000).unwrap();
+        assert_eq!(text_span(&p, b), (5000, 10_000));
+        p.retime_text(a, 0, 5000).unwrap(); // start-edge drag 1000 -> 0
+        assert_eq!(text_span(&p, a), (0, 5000));
+        // Minimum length: start edge dragged past the end stops MIN_CLIP_MS before it.
+        p.retime_text(a, 4990, 10).unwrap();
+        assert_eq!(text_span(&p, a), (5000 - MIN_CLIP_MS, 5000));
+        // Moving keeps the length; a move into B stops at B's start.
+        p.retime_text(a, 4000, MIN_CLIP_MS).unwrap();
+        assert_eq!(text_span(&p, a), (4000, 4100));
+        p.retime_text(a, 4950, MIN_CLIP_MS).unwrap();
+        assert_eq!(text_span(&p, a), (4900, 5000));
+        p.retime_text(b, 0, 5000).unwrap(); // move B left (length 5000) into A: no room, unchanged
+        assert_eq!(text_span(&p, b), (5000, 10_000));
+        // Undo walks back each accepted edit (no-op drags record nothing).
+        assert!(p.undo());
+        assert_eq!(text_span(&p, a), (4000, 4100));
+        assert!(p.undo());
+        assert!(p.undo());
+        assert_eq!(text_span(&p, a), (0, 5000));
+        assert!(p.undo());
+        assert_eq!(text_span(&p, a), (1000, 5000));
+        assert!(p.undo());
+        assert_eq!(text_span(&p, b), (5000, 7000));
+    }
+
+    #[test]
+    fn retime_caption_rescales_words_and_respects_neighbours() {
+        let p = ClioProject::new("t".into(), 1080, 1920).unwrap();
+        let v = p.add_track(TrackKind::Video, "V".into());
+        p.append_clip(v, "a".into(), "a.mp4".into(), 8000).unwrap();
+        p.set_captions(vec![
+            cap(&[(1000, 1500, "Olá,"), (1500, 2000, "você")]),
+            cap(&[(3000, 3500, "não"), (3500, 4000, "vai")]),
+            cap(&[(6000, 7000, "acreditar!")]),
+        ]);
+        // Stretch cue 1 to 2000..5000: words rescale proportionally.
+        let c = p.retime_caption(1, 2500, 5000).unwrap();
+        assert_eq!((c.start_ms, c.end_ms), (2500, 5000));
+        assert_eq!(c.words[0], CaptionWord { start_ms: 2500, end_ms: 3750, text: "não".into() });
+        assert_eq!(c.words[1].start_ms, 3750);
+        assert_eq!(c.words[1].end_ms, 5000);
+        // Start edge dragged into cue 0 stops at its end; end edge into cue 2 at its start.
+        let c = p.retime_caption(1, 1200, 5000).unwrap();
+        assert_eq!(c.start_ms, 2000);
+        let c = p.retime_caption(1, 2000, 9000).unwrap();
+        assert_eq!(c.end_ms, 6000);
+        // Last cue clamps to the video end; minimum length.
+        assert_eq!(p.retime_caption(2, 6000, 99_000).unwrap().end_ms, 8000);
+        let c = p.retime_caption(2, 7990, 8000).unwrap();
+        assert_eq!((c.start_ms, c.end_ms), (8000 - MIN_CLIP_MS, 8000));
+        assert!(c.words.iter().all(|w| w.start_ms >= c.start_ms && w.end_ms <= c.end_ms));
+        // Undo restores the previous timings and words.
+        for _ in 0..5 {
+            assert!(p.undo());
+        }
+        assert_eq!(p.captions()[1].words[0], CaptionWord { start_ms: 3000, end_ms: 3500, text: "não".into() });
+        assert!(p.retime_caption(9, 0, 1).is_err());
+    }
+
+    #[test]
+    fn styles_follow_split_duplicate_and_orphans_are_pruned() {
+        let p = ClioProject::new("t".into(), 1080, 1920).unwrap();
+        let tt = p.add_track(TrackKind::Text, "T".into());
+        let x = p.insert_clip(tt, "Olá".into(), String::new(), 0, 3000).unwrap();
+        p.set_text_style(x, TextStyle { font: TextFont::BebasNeue, size: f32::NAN, ..Default::default() }).unwrap();
+        assert_eq!(p.text_style(x).size, TextStyle::default().size);
+        let y = p.split_clip(x, 1000).unwrap();
+        let z = p.duplicate_clip(y).unwrap();
+        assert_eq!(p.text_style(y).font, TextFont::BebasNeue);
+        assert_eq!(p.text_style(z).font, TextFont::BebasNeue);
+        assert!(p.remove_clip(z));
+        assert!(!p.to_draft_json().unwrap().contains(&format!("\"{z}\":")));
+        assert_eq!(p.snapshot().text_styles.len(), 2);
+        assert!(p.undo()); // remove undone: style back with the clip
+        assert_eq!(p.text_style(z).font, TextFont::BebasNeue);
+    }
+
+    #[test]
+    fn nbsp_and_other_unicode_spaces_split_words() {
+        // Same rule as Kotlin `String.words()`: Unicode White_Space, including NBSP (U+00A0).
+        let c = Caption { start_ms: 0, end_ms: 900, text: "R$\u{a0}10\u{202f}mil\u{2009}já".into(), words: vec![] };
+        assert_eq!(effective_words(&c).iter().map(|w| w.text.as_str()).collect::<Vec<_>>(), ["R$", "10", "mil", "já"]);
+    }
+
+    #[test]
+    fn speech_language_is_saved_in_drafts() {
+        let p = ClioProject::new("t".into(), 1080, 1920).unwrap();
+        assert_eq!(p.snapshot().speech_language, None);
+        p.set_speech_language(Some(" PT ".into()));
+        let q = ClioProject::from_draft_json(p.to_draft_json().unwrap()).unwrap();
+        assert_eq!(q.speech_language().as_deref(), Some("pt"));
+        q.set_speech_language(Some(String::new()));
+        assert_eq!(q.snapshot().speech_language, None);
     }
 }

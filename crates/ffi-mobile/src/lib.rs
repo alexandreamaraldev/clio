@@ -125,6 +125,9 @@ struct State {
     /// When fitting, fill the empty area with a blurred copy of the frame.
     #[serde(default)]
     blur_bg: bool,
+    /// Whisper language for automatic captions (ISO 639-1); None = auto-detect.
+    #[serde(default)]
+    speech_language: Option<String>,
     /// Styles of text clips by clip id.
     #[serde(default)]
     text_styles: std::collections::BTreeMap<u64, TextStyle>,
@@ -206,6 +209,8 @@ pub struct Snapshot {
     pub tracks: Vec<Track>,
     pub captions: Vec<Caption>,
     pub text_styles: Vec<StyledText>,
+    /// Whisper language for automatic captions; None = auto-detect.
+    pub speech_language: Option<String>,
     pub can_undo: bool,
     pub can_redo: bool,
     pub fill: bool,
@@ -243,7 +248,7 @@ impl ClioProject {
                 captions: Vec::new(),
                 fill: false,
                 blur_bg: false,
-                text_styles: Default::default(), history: History::default(),
+                text_styles: Default::default(), speech_language: None, history: History::default(),
             }),
         })
     }
@@ -268,7 +273,8 @@ impl ClioProject {
 
     /// Full draft (engine project document + timeline + captions) for autosave.
     pub fn to_draft_json(&self) -> Result<String, ClioError> {
-        let s = self.st();
+        let mut s = self.st();
+        s.prune_text_styles();
         #[derive(serde::Serialize)]
         struct DraftRef<'a> { version: u32, state: &'a State }
         serde_json::to_string(&DraftRef { version: DRAFT_VERSION, state: &s }).map_err(|e| ClioError::Serialize { msg: e.to_string() })
@@ -376,6 +382,7 @@ impl ClioProject {
         let mut c = s.tracks[ti].clips[ci].clone();
         c.id = id;
         c.start_ms += c.duration_ms;
+        s.copy_text_style(clip_id, id);
         s.tracks[ti].clips.insert(ci + 1, c);
         s.relayout(ti);
         Ok(id)
@@ -492,6 +499,7 @@ impl ClioProject {
             tracks: s.tracks.clone(),
             captions: s.captions.clone(),
             text_styles: s.styled_texts(),
+            speech_language: s.speech_language.clone(),
             can_undo: !s.history.undo.is_empty(),
             can_redo: !s.history.redo.is_empty(),
             fill: s.fill,
@@ -515,6 +523,7 @@ impl ClioProject {
         for c in &mut t.clips[ci..] {
             c.start_ms = c.start_ms.saturating_sub(gone.duration_ms);
         }
+        s.prune_text_styles();
         true
     }
 
@@ -573,6 +582,7 @@ impl ClioProject {
                 };
                 t.clips.insert(i + 1, right);
                 s.next_id += 1;
+                s.copy_text_style(clip_id, new_id);
                 s.history.undo.push(before);
                 s.history.redo.clear();
                 return Ok(new_id);

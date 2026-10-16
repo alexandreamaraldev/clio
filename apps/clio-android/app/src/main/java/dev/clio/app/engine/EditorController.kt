@@ -143,7 +143,7 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
             caps.mapIndexed { i, c -> UiClip("Aa  " + c.text, c.startMs / 1000f, (c.endMs - c.startMs).coerceAtLeast(1) / 1000f, -1L - i) })
         ui = ui.copy(title = s.summary.name, tracks = withCaps, durationS = s.summary.durationMs.toFloat() / 1000f, captions = caps,
             hasMedia = s.tracks.any { it.kind == TrackKind.VIDEO && it.clips.isNotEmpty() }, canUndo = s.canUndo, canRedo = s.canRedo,
-            loading = false, fill = s.fill, blurBg = s.blurBg, canvasW = s.summary.width.toInt(), canvasH = s.summary.height.toInt(),
+            loading = false, captionLanguage = s.speechLanguage, fill = s.fill, blurBg = s.blurBg, canvasW = s.summary.width.toInt(), canvasH = s.summary.height.toInt(),
             texts = s.tracks.filter { it.kind == TrackKind.TEXT }.flatMap { it.clips }.map { c -> TextItem(c.id.toLong(), c.name, c.startMs.toLong(), (c.startMs + c.durationMs).toLong(), s.textStyles.firstOrNull { it.clipId == c.id }?.style ?: StyledText.defaultStyle) },
             music = s.tracks.firstOrNull { it.kind == TrackKind.AUDIO }?.clips?.firstOrNull()?.name)
         lastSnap = s
@@ -262,6 +262,8 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
     }
 
     override fun setCaptionStyle(style: CaptionStyle) { ui = ui.copy(captionStyle = style) }
+    /** Saved in the draft (engine), so it survives reopening the project. */
+    override fun setCaptionLanguage(language: String?) = launchEdit { setSpeechLanguage(language) }.let { }
 
     // --- Canvas: aspect ratio + framing ---
     override fun toggleFill() = launchEdit(rebuildPlayer = false) {
@@ -307,6 +309,9 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
     }
     override fun editText(id: Long, text: String) = launchEdit { renameClip(id.toULong(), text) }.let { }
     override fun setTextStyle(id: Long, style: uniffi.clio_ffi.TextStyle) = launchEdit { runCatching { setTextStyle(id.toULong(), style) } }.let { }
+    override fun retimeCaption(index: Int, startMs: Long, endMs: Long) = launchEdit {
+        Engine.retimeCaption(this, index, startMs, endMs).onFailure { android.util.Log.w("Clio", "retimeCaption($index, $startMs, $endMs) failed", it) }
+    }.let { }
     override fun retimeText(id: Long, startMs: Long, endMs: Long) =
         launchEdit { runCatching { retimeText(id.toULong(), startMs.coerceAtLeast(0).toULong(), (endMs - startMs).coerceAtLeast(1).toULong()) } }.let { }
 
@@ -353,6 +358,7 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
     override fun generateCaptions() {
         if (captionJob?.isActive == true) return
         captionJob = viewModelScope.launch {
+            val lang = ui.captionLanguage // null = Whisper auto-detect
             val app = getApplication<Application>()
             try {
                 val modelId = uniffi.clio_ffi.defaultSpeechModel()
@@ -375,7 +381,7 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
                     val job = coroutineContext.job
                     val caps = try {
                         withContext(Dispatchers.Default) {
-                            uniffi.clio_ffi.transcribeCaptions(models.modelsDir.path, modelId, pcm.path, uniffi.clio_ffi.speechLanguageForLocale(java.util.Locale.getDefault().toLanguageTag()), object : uniffi.clio_ffi.TranscribeProgress {
+                            uniffi.clio_ffi.transcribeCaptions(models.modelsDir.path, modelId, pcm.path, lang, object : uniffi.clio_ffi.TranscribeProgress {
                                 override fun onProgress(fraction: Float, status: String): Boolean {
                                     // Marshal to Main; never touch UI state from the engine thread.
                                     viewModelScope.launch(Dispatchers.Main) { ui = ui.copy(captionStatus = CaptionStatus.Transcribing((i + fraction) / n)) }

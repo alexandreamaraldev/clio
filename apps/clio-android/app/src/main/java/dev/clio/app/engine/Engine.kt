@@ -15,6 +15,11 @@ object Engine {
     fun newProject(name: String, width: UInt = 1080u, height: UInt = 1920u): uniffi.clio_ffi.ClioProject? =
         runCatching { uniffi.clio_ffi.ClioProject(name, width, height) }.getOrNull()
 
+    /** Retimes caption cue `index` (engine clamps to the video and neighbours, rescales words). Null on error. */
+    /** Errors (e.g. a stale index) are returned, not swallowed; callers log or show them. */
+    fun retimeCaption(p: uniffi.clio_ffi.ClioProject, index: Int, startMs: Long, endMs: Long): Result<uniffi.clio_ffi.Caption> =
+        runCatching { p.retimeCaption(index.coerceAtLeast(0).toUInt(), startMs.coerceAtLeast(0).toULong(), endMs.coerceAtLeast(0).toULong()) }
+
     data class Cap(val startMs: Long, val endMs: Long, val text: String, val words: List<uniffi.clio_ffi.CaptionWord> = emptyList()) {
         fun toFfi() = uniffi.clio_ffi.Caption(startMs.toULong(), endMs.toULong(), text, words)
     }
