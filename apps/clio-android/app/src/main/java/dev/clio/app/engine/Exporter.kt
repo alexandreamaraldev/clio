@@ -55,6 +55,9 @@ class Exporter(private val context: Context) {
 
     /** Layer decode counters from the last export (bench/QA diagnostics). */
     data class LayerStats(val decodedFrames: Int, val requestedFrames: Int)
+    /** HDR handling for one attempt: GPU tone-map, MediaCodec tone-map, or drop the grades. */
+    private enum class HdrPlan { CODEC, GL, AS_SDR, DROP }
+    private var hdrPlan = HdrPlan.GL
     private var toneMap = false
     /** pt-BR notice about the last export (e.g. HDR grade skipped), or null. */
     @Volatile var lastNotice: String? = null; private set
@@ -73,8 +76,21 @@ class Exporter(private val context: Context) {
             // Probe HDR off the main thread before building (MediaExtractor per new URI, cached).
             val videoSources = snap.tracks.firstOrNull { it.kind == TrackKind.VIDEO }?.clips.orEmpty().map { it.source }.filter { !MediaKind.isImage(context, it) }
             HdrProbe.prefetch(context, videoSources)
-            val composition = buildComposition(snap, spec, captionStyle, sources)
-            withContext(Dispatchers.Main) { run(composition, out, onProgress) }
+            // HDR + grades: MediaCodec tone-mapping (API 31+) first, then GPU tone-mapping (needs
+            // GL_EXT_YUV_target, missing on some GPUs/emulators), then reading HDR as SDR (keeps grades,
+            // flatter colours), then exporting without grades. Each failure retries automatically.
+            val plans = buildList { if (Build.VERSION.SDK_INT >= 31) add(HdrPlan.CODEC); if (Build.VERSION.SDK_INT >= 29) { add(HdrPlan.GL); add(HdrPlan.AS_SDR) }; add(HdrPlan.DROP) }
+            for ((k, plan) in plans.withIndex()) {
+                hdrPlan = plan
+                sources.forEach { it.close() }; sources.clear()
+                val composition = buildComposition(snap, spec, captionStyle, sources)
+                try { withContext(Dispatchers.Main) { run(composition, out, onProgress) }; break }
+                catch (e: ExportException) {
+                    if (!toneMap && hdrPlan != HdrPlan.DROP) throw e
+                    if (k == plans.lastIndex) throw IllegalStateException("Não foi possível exportar este vídeo HDR neste aparelho. Tente remover os filtros dos clipes.", e)
+                    android.util.Log.w("Clio", "HDR tone-map ($plan) failed, trying ${plans[k + 1]}", e)
+                }
+            }
             lastLayerStats = LayerStats(sources.sumOf { it.decodes }, sources.sumOf { it.requests })
             sources.firstNotNullOfOrNull { it.error }?.let { throw IllegalStateException(it) }
         } finally { sources.forEach { it.close() } }
@@ -93,9 +109,13 @@ class Exporter(private val context: Context) {
         // the GPU (API 29+); below that all grades are dropped for this export and [lastNotice] says so.
         val graded = Grades.byClip(snap.grades)
         val anyHdr = video.any { !MediaKind.isImage(context, it.source) && HdrProbe.cached(it.source) == true }
-        toneMap = anyHdr && graded.isNotEmpty() && android.os.Build.VERSION.SDK_INT >= 29
+        toneMap = anyHdr && graded.isNotEmpty() && hdrPlan != HdrPlan.DROP
         val dropGrades = anyHdr && graded.isNotEmpty() && !toneMap
-        lastNotice = if (dropGrades) "Vídeo HDR: os filtros foram ignorados nesta exportação (requer Android 10 ou mais recente)." else null
+        lastNotice = when {
+            dropGrades -> "Vídeo HDR: os filtros foram ignorados nesta exportação (este aparelho não converte HDR para SDR)."
+            toneMap && hdrPlan == HdrPlan.AS_SDR -> "Vídeo HDR: este aparelho não converte HDR; as cores do trecho HDR podem ficar lavadas."
+            else -> null
+        }
         val gradeOf = if (dropGrades) emptyMap() else graded
         val totalMs = snap.summary.durationMs.toLong()
         val blur = snap.blurBg && !snap.fill
@@ -142,7 +162,11 @@ class Exporter(private val context: Context) {
         val seqs = mutableListOf(EditedMediaItemSequence(items))
         seqs += AudioExport.sequences(context, snap, totalMs, chain = ::audioChain)
         return Composition.Builder(seqs).experimentalSetForceAudioTrack(true)
-            .apply { if (toneMap) setHdrMode(Composition.HDR_MODE_TONE_MAP_HDR_TO_SDR_USING_OPEN_GL) }
+            .apply { if (toneMap) setHdrMode(when (hdrPlan) {
+                HdrPlan.CODEC -> Composition.HDR_MODE_TONE_MAP_HDR_TO_SDR_USING_MEDIACODEC
+                HdrPlan.AS_SDR -> Composition.HDR_MODE_EXPERIMENTAL_FORCE_INTERPRET_HDR_AS_SDR
+                else -> Composition.HDR_MODE_TONE_MAP_HDR_TO_SDR_USING_OPEN_GL
+            }) }
             .setEffects(Effects(listOf(LimiterProcessor()), emptyList())).build()
     }
 

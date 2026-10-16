@@ -10,6 +10,10 @@
 - Exportação: um clipe HDR deixa o pipeline inteiro da sequência em HDR. Por isso, se houver **qualquer** clipe HDR
   e algum grade (mesmo num clipe SDR), a composição usa `HDR_MODE_TONE_MAP_HDR_TO_SDR_USING_OPEN_GL` (API 29+) e o
   vídeo inteiro sai em SDR. Abaixo da API 29 todos os grades são ignorados nessa exportação e o app mostra um aviso.
+- Fallback por aparelho: o tone-map por GPU exige `GL_EXT_YUV_target` (falta no emulador do CI). Ordem tentada:
+  MediaCodec (API 31+) → OpenGL (API 29+) → `HDR_MODE_EXPERIMENTAL_FORCE_INTERPRET_HDR_AS_SDR` (mantém o grade,
+  cores do trecho HDR lavadas, com aviso) → sem grades (com aviso). Cada falha (`ExportException`) tenta a próxima;
+  se todas falharem, erro em pt-BR ("Não foi possível exportar este vídeo HDR neste aparelho…"), sem crash.
 - Detecção: `HdrProbe` (MediaExtractor, `KEY_COLOR_TRANSFER`) roda em background e guarda o resultado por URI.
 - Prévia: com algum clipe HDR na playlist o efeito de LUT não é instalado; aparece o aviso
   "Vídeo HDR: filtros e ajustes não aparecem na prévia…".
