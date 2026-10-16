@@ -106,13 +106,7 @@ class Exporter(private val context: Context) {
                 .build()
         }
         val seqs = mutableListOf(EditedMediaItemSequence(items))
-        snap.tracks.firstOrNull { it.kind == TrackKind.AUDIO }?.clips?.firstOrNull()?.let { m ->
-            val end = minOf(m.durationMs.toLong(), totalMs - m.startMs.toLong()).coerceAtLeast(1)
-            val mi = MediaItem.Builder().setUri(m.source).setClippingConfiguration(
-                MediaItem.ClippingConfiguration.Builder().setStartPositionMs(m.inMs.toLong()).setEndPositionMs(m.inMs.toLong() + Mix.spanMs(end, m.speed)).build()).build()
-            seqs += EditedMediaItemSequence(ImmutableList.of(EditedMediaItem.Builder(mi).setRemoveVideo(true)
-                .setEffects(Effects(audioChain(m, m.speed), ImmutableList.of())).build()))
-        }
+        seqs += AudioExport.sequences(context, snap, totalMs, ::audioChain)
         return Composition.Builder(seqs).build()
     }
 

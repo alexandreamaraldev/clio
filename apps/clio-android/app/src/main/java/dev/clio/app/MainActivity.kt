@@ -117,6 +117,7 @@ private fun EditorRoute(draftId: String, isNew: Boolean, initialTool: Int, impor
         if (uris.isNotEmpty()) vm.addMedia(uris)
     }
     val music = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> if (uri != null) vm.addMusic(uri) }
+    val mic = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { ok -> if (ok) vm.toggleVoiceover() }
     val back by rememberUpdatedState(onBack)
     LaunchedEffect(vm) {
         vm.events.collect { e ->
@@ -124,6 +125,7 @@ private fun EditorRoute(draftId: String, isNew: Boolean, initialTool: Int, impor
                 EditorEvent.Back -> back()
                 EditorEvent.PickMedia -> picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo))
                 EditorEvent.PickMusic -> music.launch(arrayOf("audio/*"))
+                EditorEvent.RequestMic -> mic.launch(android.Manifest.permission.RECORD_AUDIO)
             }
         }
     }

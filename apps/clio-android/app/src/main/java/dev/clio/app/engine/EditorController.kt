@@ -29,6 +29,7 @@ sealed interface EditorEvent {
     data object Back : EditorEvent
     data object PickMedia : EditorEvent
     data object PickMusic : EditorEvent
+    data object RequestMic : EditorEvent
 }
 
 sealed interface ExportState {
@@ -86,15 +87,16 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
         addListener(object : Player.Listener {
             override fun onIsPlayingChanged(isPlaying: Boolean) {
                 ui = ui.copy(playing = isPlaying)
-                if (isPlaying) { syncMusic(); musicPlayer.play() } else musicPlayer.pause()
+                audio.tick((playheadState.floatValue * 1000).toLong(), isPlaying && !voice.isRecording)
             }
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) { applyItemParams() }
             override fun onPlaybackStateChanged(state: Int) { if (state == Player.STATE_ENDED) { pause(); seekTimeline(0f) } }
         })
     }
-    /** Music preview runs on its own player, slaved to the timeline. */
-    val musicPlayer: ExoPlayer = ExoPlayer.Builder(app).build()
-    private var musicClip: uniffi.clio_ffi.Clip? = null
+    /** Audio lanes (music, detached audio, voiceover, SFX) preview on their own players, slaved to the timeline. */
+    private val audio = AudioMix(app)
+    private val voice = VoiceoverRecorder(app)
+    private var voiceStartMs = 0L
     private var clipStarts: LongArray = LongArray(0)
     private var videoClips: List<uniffi.clio_ffi.Clip> = emptyList()
     private var saveJob: Job? = null
@@ -145,7 +147,8 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
             hasMedia = s.tracks.any { it.kind == TrackKind.VIDEO && it.clips.isNotEmpty() }, canUndo = s.canUndo, canRedo = s.canRedo,
             loading = false, fill = s.fill, blurBg = s.blurBg, canvasW = s.summary.width.toInt(), canvasH = s.summary.height.toInt(),
             texts = s.tracks.filter { it.kind == TrackKind.TEXT }.flatMap { it.clips }.map { TextItem(it.id.toLong(), it.name, it.startMs.toLong(), (it.startMs + it.durationMs).toLong()) },
-            music = s.tracks.firstOrNull { it.kind == TrackKind.AUDIO }?.clips?.firstOrNull()?.name)
+            music = s.tracks.firstOrNull { it.kind == TrackKind.AUDIO && it.name == MUSIC }?.clips?.firstOrNull()?.name)
+        Waveforms.request(getApplication(), viewModelScope, audio.clipsOf(s))
         lastSnap = s
         if (rebuildPlayer) rebuildPlaylist(s) else refreshClipCache(s)
     }
@@ -163,11 +166,7 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
             }.build()
         })
         player.prepare()
-        musicClip = s.tracks.firstOrNull { it.kind == TrackKind.AUDIO }?.clips?.firstOrNull()
-        musicClip?.let { m ->
-            musicPlayer.setMediaItem(MediaItem.fromUri(m.source)); musicPlayer.prepare()
-            musicPlayer.playbackParameters = PlaybackParameters(m.speed)
-        } ?: musicPlayer.clearMediaItems()
+        audio.setClips(audio.clipsOf(s))
         applyItemParams()
         if (clips.isNotEmpty()) seekTimeline(playheadState.floatValue.coerceAtMost(ui.durationS))
     }
@@ -179,10 +178,8 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
         val local = (player.currentPosition / (c?.speed ?: 1f)).toLong()
         playheadState.floatValue = (clipStarts.getOrElse(idx) { 0L } + local) / 1000f
         if (c != null) player.volume = Mix.gain(local, c.durationMs.toLong(), c.volume, c.fadeInMs.toLong(), c.fadeOutMs.toLong(), c.muted).coerceAtMost(1f)
-        musicClip?.let { m ->
-            val t = (playheadState.floatValue * 1000).toLong() - m.startMs.toLong()
-            musicPlayer.volume = Mix.gain(t, m.durationMs.toLong(), m.volume, m.fadeInMs.toLong(), m.fadeOutMs.toLong(), m.muted).coerceAtMost(1f)
-        }
+        if (voice.isRecording) player.volume = 0f // no speaker bleed into the mic
+        audio.tick((playheadState.floatValue * 1000).toLong(), player.isPlaying && !voice.isRecording)
     }
 
     /** Per-clip speed/volume for whichever item ExoPlayer is on (it has one global setting). */
@@ -192,11 +189,6 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
         player.volume = if (c.muted) 0f else c.volume.coerceAtMost(1f)
     }
 
-    private fun syncMusic() {
-        val m = musicClip ?: return
-        val t = (playheadState.floatValue * 1000).toLong() - m.startMs.toLong()
-        if (t in 0 until m.durationMs.toLong()) musicPlayer.seekTo(m.inMs.toLong() + Mix.spanMs(t, m.speed)) else musicPlayer.pause()
-    }
 
     private fun seekTimeline(s: Float) {
         val ms = (s * 1000).toLong()
@@ -204,7 +196,7 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
         if (clipStarts.isNotEmpty()) player.seekTo(idx, Mix.spanMs(ms - clipStarts[idx], videoClips.getOrNull(idx)?.speed ?: 1f))
         applyItemParams()
         playheadState.floatValue = s
-        syncMusic()
+        audio.seek(ms)
     }
 
     private fun scheduleSave() {
@@ -284,7 +276,7 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
 
     private fun refreshClipCache(s: Snapshot) {
         videoClips = s.tracks.firstOrNull { it.id == videoTrack }?.clips.orEmpty()
-        musicClip = s.tracks.firstOrNull { it.kind == TrackKind.AUDIO }?.clips?.firstOrNull()
+        audio.setClips(audio.clipsOf(s))
         applyItemParams()
     }
 
@@ -309,15 +301,38 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
         val d = media.audioDurationMs(uri).takeIf { it > 0 } ?: return@launch
         val name = media.displayName(uri)
         val tid = withContext(engine) {
-            val existing = project.tracks().firstOrNull { it.kind == TrackKind.AUDIO }
+            val existing = project.tracks().firstOrNull { it.kind == TrackKind.AUDIO && it.name == MUSIC }
             existing?.clips?.forEach { project.removeClip(it.id) }
-            existing?.id ?: project.addTrack(TrackKind.AUDIO, "Música")
+            existing?.id ?: project.addTrack(TrackKind.AUDIO, MUSIC)
         }
         apply(edit { insertClip(tid, name, uri.toString(), 0u, d.toULong()) }, rebuildPlayer = true)
     }
     override fun removeMusic() = launchEdit(rebuildPlayer = true) {
-        tracks().filter { it.kind == TrackKind.AUDIO }.flatMap { it.clips }.forEach { removeClip(it.id) }
+        tracks().filter { it.kind == TrackKind.AUDIO && it.name == MUSIC }.flatMap { it.clips }.forEach { removeClip(it.id) }
     }.let { }
+
+    // --- Audio lanes (AudioMix / VoiceoverRecorder / SfxLibrary) ---
+    override fun detachAudio(clipId: Long?) = launchEdit(rebuildPlayer = true) { target(clipId)?.let { runCatching { detachAudio(it) } } }.let { }
+    override fun addSfx(id: String) {
+        val s = SfxLibrary.all.firstOrNull { it.id == id } ?: return
+        val at = (playheadState.floatValue * 1000).toLong().toULong()
+        viewModelScope.launch {
+            val f = withContext(Dispatchers.IO) { SfxLibrary.file(getApplication(), s) }
+            apply(edit { runCatching { addAudioClip("Efeitos", s.label, Uri.fromFile(f).toString(), at, s.durationMs.toULong()) } }, rebuildPlayer = false)
+        }
+    }
+    override fun toggleVoiceover() {
+        if (voice.isRecording) {
+            player.pause()
+            val rec = voice.stop()
+            ui = ui.copy(recording = false)
+            if (rec != null) launchEdit { runCatching { addVoiceover(Uri.fromFile(rec.first).toString(), voiceStartMs.toULong(), rec.second.toULong()) } }
+            return
+        }
+        if (!voice.hasPermission()) { _events.tryEmit(EditorEvent.RequestMic); return }
+        voiceStartMs = (playheadState.floatValue * 1000).toLong()
+        if (voice.start()) { ui = ui.copy(recording = true); if (ui.hasMedia) player.play() }
+    }
     override fun playPause() { if (player.isPlaying) player.pause() else if (ui.hasMedia) player.play() }
     override fun scrub(s: Float) { if (player.isPlaying) player.pause(); seekTimeline(s.coerceIn(0f, ui.durationS)) }
     override fun addClip() { _events.tryEmit(EditorEvent.PickMedia) }
@@ -402,7 +417,8 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
     override fun onCleared() {
         flushSave()
         player.release()
-        musicPlayer.release()
+        voice.cancel()
+        audio.release()
         // `project` is freed by its Cleaner once the flush above no longer references it.
     }
 }
@@ -412,3 +428,5 @@ object QaHooks {
     @Volatile var ui: EditorUi? = null
     @Volatile var export: ExportState? = null
 }
+
+private const val MUSIC = "Música"

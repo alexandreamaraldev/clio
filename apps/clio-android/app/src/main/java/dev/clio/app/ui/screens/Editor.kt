@@ -98,6 +98,7 @@ data class EditorUi(
     val texts: List<TextItem> = emptyList(),
     val music: String? = null,
     val captionStyle: CaptionStyle = CaptionStyle.Clean,
+    val recording: Boolean = false,
 )
 
 interface EditorActions {
@@ -125,6 +126,9 @@ interface EditorActions {
     fun setAudio(clipId: Long?, volume: Float, fadeInS: Float, fadeOutS: Float, muted: Boolean) {}
     fun setAspect(a: dev.clio.app.engine.Aspect) {}
     fun setFraming(fill: Boolean, blur: Boolean) {}
+    fun detachAudio(clipId: Long?) {}
+    fun toggleVoiceover() {}
+    fun addSfx(id: String) {}
 }
 
 object NoActions : EditorActions
@@ -215,7 +219,8 @@ fun EditorScreen(
             when (panel) {
                 TOOL_CAPTIONS -> CaptionsPanel(ui.captions, capStyle, ui.captionStatus, actions::setCaptionStyle, actions::generateCaptions, actions::editCaptions)
                 TOOL_TEXT -> TextPanel(ui.texts, actions::addText, actions::editText)
-                TOOL_MUSIC -> MusicPanel(ui.music, actions::pickMusic, actions::removeMusic)
+                TOOL_MUSIC -> AudioPanel(ui.music, ui.recording, target != null && target.source != null && !target.muted && ui.tracks.any { t -> t.kind == "video" && target in t.clips },
+                    actions::pickMusic, actions::removeMusic, actions::toggleVoiceover, { actions.detachAudio(target?.id) }, actions::addSfx)
                 TOOL_SPEED -> SpeedPanel(target) { actions.setSpeed(target?.id, it) }
                 TOOL_VOLUME -> VolumePanel(target) { v, fi, fo, m -> actions.setAudio(target?.id, v, fi, fo, m) }
                 TOOL_FORMAT -> FormatPanel(ui.canvasW, ui.canvasH, ui.fill, ui.blurBg, actions::setAspect, actions::setFraming)
@@ -473,7 +478,8 @@ private fun ClipView(
             .border(if (isSel) 1.5.dp else 1.dp, if (isSel) ClioColors.TextPrimary else ClioColors.Hairline, ClioShapes.sm),
         contentAlignment = Alignment.CenterStart,
     ) {
-        if (kind == "audio") Waveform(Modifier.fillMaxSize().padding(vertical = 6.dp))
+        if (kind == "audio") dev.clio.app.engine.Waveforms.peaks[dev.clio.app.engine.Waveforms.key(c.source, (c.inS * 1000).roundToInt().toLong(), dev.clio.app.engine.Mix.spanMs((c.lenS * 1000).roundToInt().toLong(), c.speed))]
+            ?.let { PeaksWaveform(it, Modifier.fillMaxSize().padding(vertical = 6.dp)) } ?: Waveform(Modifier.fillMaxSize().padding(vertical = 6.dp))
         if (kind == "video" && c.source != null) Filmstrip(c, Modifier.matchParentSize())
         Text(c.label + if (c.speed != 1f) "  ${fmtSpeed(c.speed)}" else "", style = MaterialTheme.typography.labelSmall, color = ClioColors.TextPrimary, maxLines = 1,
             modifier = Modifier.padding(horizontal = 16.dp).then(
