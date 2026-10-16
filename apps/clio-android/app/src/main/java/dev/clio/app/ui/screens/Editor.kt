@@ -56,6 +56,7 @@ import kotlin.math.abs
 import kotlin.math.ceil
 import kotlin.math.floor
 import kotlin.math.roundToInt
+import kotlin.math.roundToLong
 
 private data class Tool(val icon: ImageVector, val label: String, val ready: Boolean = true)
 private val tools = listOf(
@@ -234,7 +235,7 @@ fun EditorScreen(
                 else -> Timeline(ui.tracks, ui.durationS, playhead, ui.playing, selectedClip, { selectedClip = it }, actions::scrub, actions::addClip,
                     onTrim = actions::trim, onMove = actions::move,
                     onRetime = { id, startS, lenS ->
-                        val a = (startS * 1000).roundToInt().toLong(); val b = ((startS + lenS) * 1000).roundToInt().toLong()
+                        val a = (startS * 1000.0).roundToLong(); val b = ((startS + lenS) * 1000.0).roundToLong()
                         // Caption cues are shown with ids -1-index; text clips use their engine id. The engine clamps
                         // (neighbours, [0, duration], 100 ms minimum) and records one undo step per change.
                         if (id >= 0) actions.retimeText(id, a, b) else actions.retimeCaption((-1 - id).toInt(), a, b)
@@ -512,15 +513,19 @@ private fun ClipView(
         if (isSel && onTrim != null) {
             val cur by rememberUpdatedState(onTrim)
             val density = LocalDensity.current
-            // Text clips: 48 dp touch targets, capped at half the clip so short clips keep both reachable.
-            val touch = if (kind == "text") with(density) { minOf(48.dp.toPx(), (c.lenS * pps() - gap) / 2).toDp() } else 12.dp
+            // Text clips: 48 dp touch targets, shrunk on short clips so a 32 dp middle stays free for
+            // the long-press move (never below the 12 dp bar).
+            val touch = if (kind == "text") with(density) {
+                ((c.lenS * pps() - gap - 32.dp.toPx()) / 2).coerceIn(12.dp.toPx(), 48.dp.toPx()).toDp()
+            } else 12.dp
+            val name = c.label.removePrefix("Aa").trim()
             val a11y = kind == "text"
             TrimHandle(Modifier.align(Alignment.CenterStart).testTag("trim-left"), onDrag = { trimL = (trimL + it).coerceAtMost(c.lenS * pps() - 24f) },
-                left = true, touchW = touch, a11y = if (a11y) "Início de ${c.label}" else null, onNudge = if (a11y) { d -> cur(true, d) } else null) {
+                left = true, touchW = touch, a11y = if (a11y) "Início de $name" else null, onNudge = if (a11y) { d -> cur(true, d) } else null) {
                 val d = trimL / pps(); trimL = 0f; cur(true, d)
             }
             TrimHandle(Modifier.align(Alignment.CenterEnd).testTag("trim-right"), onDrag = { trimR = (trimR + it).coerceAtLeast(-(c.lenS * pps() - 24f)) },
-                left = false, touchW = touch, a11y = if (a11y) "Fim de ${c.label}" else null, onNudge = if (a11y) { d -> cur(false, d) } else null) {
+                left = false, touchW = touch, a11y = if (a11y) "Fim de $name" else null, onNudge = if (a11y) { d -> cur(false, d) } else null) {
                 val d = trimR / pps(); trimR = 0f; cur(false, d)
             }
         }
