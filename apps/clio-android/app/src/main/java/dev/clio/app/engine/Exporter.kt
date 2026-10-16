@@ -20,7 +20,6 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.effect.OverlayEffect
-import androidx.media3.effect.FrameDropEffect
 import androidx.media3.effect.BitmapOverlay
 import androidx.media3.effect.SpeedChangeEffect
 import androidx.media3.common.C
@@ -110,7 +109,7 @@ class Exporter(private val context: Context) {
             val incoming = Layers.incoming(video, index)
             val video = mutableListOf<androidx.media3.common.Effect>()
             if (speed != 1f) video += SpeedChangeEffect(speed)
-            if (!isImage && frameDrop) video += FrameDropEffect.createDefaultFrameDropEffect(spec.fps.toFloat())
+            if (!isImage && frameDrop) video += FpsCap(spec.fps.toFloat())
             video += Presentation.createForWidthAndHeight(spec.width, spec.height,
                 if (snap.fill) Presentation.LAYOUT_SCALE_TO_FIT_WITH_CROP else Presentation.LAYOUT_SCALE_TO_FIT)
             // Blurred background: a pre-blurred still of the clip fills the letterbox bars (the centre is
