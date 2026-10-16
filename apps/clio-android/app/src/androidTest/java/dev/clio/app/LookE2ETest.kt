@@ -72,6 +72,14 @@ class LookE2ETest {
         compose.waitForIdle()
     }
 
+    /** The filter strip is a LazyRow: scroll it to the thumbnail, then tap it. */
+    private fun pick(label: String) {
+        compose.onNode(hasScrollToNodeAction() and hasAnyDescendant(hasContentDescription("Filtro ", substring = true)), useUnmergedTree = true)
+            .performScrollToNode(hasContentDescription("Filtro $label"))
+        compose.onNodeWithContentDescription("Filtro $label").performClick()
+        compose.waitForIdle()
+    }
+
     private fun openDraft() {
         compose.waitUntil(30_000) { compose.onAllNodesWithTag("home").fetchSemanticsNodes().isNotEmpty() }
         compose.onNodeWithTag("home").performScrollToNode(hasTestTag("draft-0"))
@@ -87,13 +95,13 @@ class LookE2ETest {
         // Every preset, then back to none.
         tool("Filtros")
         for ((id, label) in LookPresets.all) {
-            compose.onNodeWithContentDescription("Filtro $label").performScrollTo().performClick()
+            pick(label)
             waitUi("preset $id") { grade(it)?.filter == id && grade(it)?.intensity == 1f }
             shot("look-preset-$id")
         }
-        compose.onNodeWithContentDescription("Filtro Nenhum").performScrollTo().performClick()
+        pick("Nenhum")
         waitUi("no filter") { grade(it) == null }
-        compose.onNodeWithContentDescription("Filtro Vívido").performScrollTo().performClick()
+        pick("Vívido")
         waitUi("vivido") { grade(it)?.filter == "vivido" }
         tool("Filtros")
 
