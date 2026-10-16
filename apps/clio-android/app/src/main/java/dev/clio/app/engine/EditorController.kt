@@ -262,6 +262,7 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
     }
 
     override fun setCaptionStyle(style: CaptionStyle) { ui = ui.copy(captionStyle = style) }
+    override fun setCaptionLanguage(language: String?) { ui = ui.copy(captionLanguage = language) }
 
     // --- Canvas: aspect ratio + framing ---
     override fun toggleFill() = launchEdit(rebuildPlayer = false) {
@@ -354,6 +355,7 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
     override fun generateCaptions() {
         if (captionJob?.isActive == true) return
         captionJob = viewModelScope.launch {
+            val lang = ui.captionLanguage // null = Whisper auto-detect
             val app = getApplication<Application>()
             try {
                 val modelId = uniffi.clio_ffi.defaultSpeechModel()
@@ -376,7 +378,7 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
                     val job = coroutineContext.job
                     val caps = try {
                         withContext(Dispatchers.Default) {
-                            uniffi.clio_ffi.transcribeCaptions(models.modelsDir.path, modelId, pcm.path, uniffi.clio_ffi.speechLanguageForLocale(java.util.Locale.getDefault().toLanguageTag()), object : uniffi.clio_ffi.TranscribeProgress {
+                            uniffi.clio_ffi.transcribeCaptions(models.modelsDir.path, modelId, pcm.path, lang, object : uniffi.clio_ffi.TranscribeProgress {
                                 override fun onProgress(fraction: Float, status: String): Boolean {
                                     // Marshal to Main; never touch UI state from the engine thread.
                                     viewModelScope.launch(Dispatchers.Main) { ui = ui.copy(captionStatus = CaptionStatus.Transcribing((i + fraction) / n)) }

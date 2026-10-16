@@ -73,8 +73,9 @@ impl Default for TextStyle {
 
 impl TextStyle {
     fn clamped(mut self) -> Self {
-        self.size = self.size.clamp(0.01, 0.2);
-        self.stroke_width = self.stroke_width.clamp(0.0, 0.3);
+        let d = TextStyle::default();
+        self.size = if self.size.is_finite() { self.size.clamp(0.01, 0.2) } else { d.size };
+        self.stroke_width = if self.stroke_width.is_finite() { self.stroke_width.clamp(0.0, 0.3) } else { 0.0 };
         self.anim_ms = self.anim_ms.clamp(0, 2000);
         self
     }
@@ -460,6 +461,17 @@ impl crate::State {
             _ => Err(ClioError::Invalid { msg: format!("not a text clip: {clip_id}") }),
         }
     }
+    /// Split/duplicate: the new clip inherits the source clip's style.
+    pub(crate) fn copy_text_style(&mut self, from: u64, to: u64) {
+        if let Some(st) = self.text_styles.get(&from).cloned() {
+            self.text_styles.insert(to, st);
+        }
+    }
+    /// Drops styles of clips that no longer exist (deleted clips; undo restores them with the snapshot).
+    pub(crate) fn prune_text_styles(&mut self) {
+        let live: std::collections::BTreeSet<u64> = self.tracks.iter().flat_map(|t| t.clips.iter().map(|c| c.id)).collect();
+        self.text_styles.retain(|id, _| live.contains(id));
+    }
     pub(crate) fn styled_texts(&self) -> Vec<StyledText> {
         self.text_styles.iter().filter(|(id, _)| self.find(**id).is_some()).map(|(id, s)| StyledText { clip_id: *id, style: s.clone() }).collect()
     }
@@ -648,5 +660,23 @@ mod tests {
         }
         assert_eq!(p.captions()[1].words[0], CaptionWord { start_ms: 3000, end_ms: 3500, text: "não".into() });
         assert!(p.retime_caption(9, 0, 1).is_err());
+    }
+
+    #[test]
+    fn styles_follow_split_duplicate_and_orphans_are_pruned() {
+        let p = ClioProject::new("t".into(), 1080, 1920).unwrap();
+        let tt = p.add_track(TrackKind::Text, "T".into());
+        let x = p.insert_clip(tt, "Olá".into(), String::new(), 0, 3000).unwrap();
+        p.set_text_style(x, TextStyle { font: TextFont::BebasNeue, size: f32::NAN, ..Default::default() }).unwrap();
+        assert_eq!(p.text_style(x).size, TextStyle::default().size);
+        let y = p.split_clip(x, 1000).unwrap();
+        let z = p.duplicate_clip(y).unwrap();
+        assert_eq!(p.text_style(y).font, TextFont::BebasNeue);
+        assert_eq!(p.text_style(z).font, TextFont::BebasNeue);
+        assert!(p.remove_clip(z));
+        assert!(!p.to_draft_json().unwrap().contains(&format!("\"{z}\":")));
+        assert_eq!(p.snapshot().text_styles.len(), 2);
+        assert!(p.undo()); // remove undone: style back with the clip
+        assert_eq!(p.text_style(z).font, TextFont::BebasNeue);
     }
 }

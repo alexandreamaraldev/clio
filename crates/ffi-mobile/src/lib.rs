@@ -268,7 +268,8 @@ impl ClioProject {
 
     /// Full draft (engine project document + timeline + captions) for autosave.
     pub fn to_draft_json(&self) -> Result<String, ClioError> {
-        let s = self.st();
+        let mut s = self.st();
+        s.prune_text_styles();
         #[derive(serde::Serialize)]
         struct DraftRef<'a> { version: u32, state: &'a State }
         serde_json::to_string(&DraftRef { version: DRAFT_VERSION, state: &s }).map_err(|e| ClioError::Serialize { msg: e.to_string() })
@@ -376,6 +377,7 @@ impl ClioProject {
         let mut c = s.tracks[ti].clips[ci].clone();
         c.id = id;
         c.start_ms += c.duration_ms;
+        s.copy_text_style(clip_id, id);
         s.tracks[ti].clips.insert(ci + 1, c);
         s.relayout(ti);
         Ok(id)
@@ -515,6 +517,7 @@ impl ClioProject {
         for c in &mut t.clips[ci..] {
             c.start_ms = c.start_ms.saturating_sub(gone.duration_ms);
         }
+        s.prune_text_styles();
         true
     }
 
@@ -573,6 +576,7 @@ impl ClioProject {
                 };
                 t.clips.insert(i + 1, right);
                 s.next_id += 1;
+                s.copy_text_style(clip_id, new_id);
                 s.history.undo.push(before);
                 s.history.redo.clear();
                 return Ok(new_id);

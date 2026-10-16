@@ -43,7 +43,7 @@ object StyledText {
 
     fun captionFrame(c: Caption, preset: CaptionPreset, tMs: Long): CaptionFrame =
         runCatching { uniffi.clio_ffi.captionFrame(c, preset, tMs.coerceAtLeast(0).toULong()) }.getOrElse {
-            CaptionFrame(c.text.split(' ').filter { it.isNotEmpty() }.map { WordFrame(it, WordState.FUTURE, 0xFFFFFFFFu, 0u, 1f, 1f, 0f) },
+            CaptionFrame(c.text.words().map { WordFrame(it, WordState.FUTURE, 0xFFFFFFFFu, 0u, 1f, 1f, 0f) },
                 fallbackStyle.copy(size = 0.034f, font = TextFont.INTER, bold = false), 1f, 1f)
         }
 
@@ -57,13 +57,16 @@ object StyledText {
         bi.setText(text)
         val cut = if (end >= text.length || bi.isBoundary(end)) end else bi.preceding(end).coerceAtLeast(0)
         val shown = text.substring(0, cut)
-        return shown.split(' ').filter { it.isNotEmpty() }.map { WordFrame(it, WordState.PAST, style.color, 0u, 1f, 1f, 0f) }
+        return shown.words().map { WordFrame(it, WordState.PAST, style.color, 0u, 1f, 1f, 0f) }
     }
 }
 
+private val ws = Regex("\\s+")
+internal fun String.words(): List<String> = trim().split(ws).filter { it.isNotEmpty() }
+
 /** Typefaces for [TextFont]; all bundled fonts are SIL OFL 1.1 (see assets/licenses). */
 object Fonts {
-    private val cache = HashMap<Pair<TextFont, Boolean>, Typeface>()
+    private val cache = java.util.concurrent.ConcurrentHashMap<Pair<TextFont, Boolean>, Typeface>()
     fun res(f: TextFont) = when (f) {
         TextFont.INTER -> R.font.inter
         TextFont.MONTSERRAT -> R.font.montserrat
@@ -73,10 +76,12 @@ object Fonts {
     fun label(f: TextFont) = when (f) {
         TextFont.INTER -> "Inter"; TextFont.MONTSERRAT -> "Montserrat"; TextFont.BEBAS_NEUE -> "Bebas"; TextFont.PACIFICO -> "Pacifico"
     }
-    fun get(context: Context, f: TextFont, bold: Boolean): Typeface = cache.getOrPut(f to bold) {
-        val base = runCatching { ResourcesCompat.getFont(context, res(f)) }.getOrNull() ?: Typeface.DEFAULT
-        // Inter and Montserrat are variable fonts: pick a real heavy weight where the platform allows.
-        if (!bold) base else if (Build.VERSION.SDK_INT >= 28) Typeface.create(base, 800, false) else Typeface.create(base, Typeface.BOLD)
+    /** Inter and Montserrat ship as variable fonts with a real wght axis; Bebas Neue and Pacifico are single-weight. */
+    fun variable(f: TextFont) = f == TextFont.INTER || f == TextFont.MONTSERRAT
+    /** Thread-safe (preview on main, export on the GL thread). Bold is a real weight on variable fonts and ignored on static ones (no faux bold). */
+    fun get(context: Context, f: TextFont, bold: Boolean): Typeface = cache.computeIfAbsent(f to (bold && variable(f))) { (font, b) ->
+        val base = runCatching { ResourcesCompat.getFont(context, res(font)) }.getOrNull() ?: Typeface.DEFAULT
+        if (!b) base else if (Build.VERSION.SDK_INT >= 28) Typeface.create(base, 800, false) else Typeface.create(base, Typeface.BOLD)
     }
 }
 
@@ -175,9 +180,9 @@ class TextPainter(private val context: Context) {
     private fun UInt.alpha(): Int = (this shr 24).toInt() and 0xFF
 }
 
-/** Timeline time (ms) → what to draw: a style, words and a whole-block animation. */
-class TextScene(val style: TextStyle, val words: List<WordFrame>, val alpha: Float, val scale: Float, val offsetY: Float) {
-    val key: String = "$style|$words|$alpha|$scale|$offsetY"
+/** Timeline time (ms) → what to draw: a style, words and a whole-block animation. Equality is structural (frame cache key). */
+data class TextScene(val style: TextStyle, val words: List<WordFrame>, val alpha: Float, val scale: Float, val offsetY: Float) {
+    val visible get() = words.isNotEmpty() && alpha > 0f
     companion object {
         val Empty = TextScene(StyledText.fallbackStyle, emptyList(), 0f, 1f, 0f)
 
@@ -213,19 +218,26 @@ class StyledTextOverlay(
 ) : BitmapOverlay() {
     private val painter = TextPainter(context)
     private var basePts = Long.MIN_VALUE
-    private var lastKey: String? = null
-    private var last: Bitmap = Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888)
+    private var lastScene: TextScene? = null
+    private val blank = Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888)
+    // Media3 re-uploads an overlay when the returned Bitmap *instance* changes, so two fixed-size
+    // buffers are reused alternately (no per-frame allocation); unchanged scenes return the same one.
+    private val bufH = max(2, frameH / 2)
+    private val buffers = arrayOfNulls<Bitmap>(2)
+    private var flip = 0
+    private var last: Bitmap = blank
 
     override fun getBitmap(presentationTimeUs: Long): Bitmap {
         if (basePts == Long.MIN_VALUE) basePts = presentationTimeUs
         val s = scene(clipStartMs + (presentationTimeUs - basePts) / 1000)
-        if (s.key == lastKey) return last
-        lastKey = s.key
-        if (s.words.isEmpty() || s.alpha <= 0f) { last = Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888); return last }
-        // Room for pop/bounce overshoot around the block.
-        val h = max(2, (painter.measure(s.words, s.style, frameW, frameH) * 1.6f).toInt())
-        last = Bitmap.createBitmap(frameW, h, Bitmap.Config.ARGB_8888)
-        painter.draw(Canvas(last), s.words, s.style, frameW, frameH, frameW / 2f, h / 2f, s.alpha, s.scale, s.offsetY)
+        if (s == lastScene) return last
+        lastScene = s
+        if (!s.visible) { last = blank; return last }
+        flip = 1 - flip
+        val bmp = buffers[flip] ?: Bitmap.createBitmap(frameW, bufH, Bitmap.Config.ARGB_8888).also { buffers[flip] = it }
+        bmp.eraseColor(0)
+        painter.draw(Canvas(bmp), s.words, s.style, frameW, frameH, frameW / 2f, bufH / 2f, s.alpha, s.scale, s.offsetY)
+        last = bmp
         return last
     }
 

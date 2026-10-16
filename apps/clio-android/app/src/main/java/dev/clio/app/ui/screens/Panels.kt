@@ -1,6 +1,5 @@
 package dev.clio.app.ui.screens
 
-import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.material.icons.outlined.Palette
@@ -100,9 +99,9 @@ private fun TextStyleEditor(t: TextItem, onStyle: (TextStyle) -> Unit, onRetime:
                 Box(Modifier.size(24.dp).pressable { onStyle(st.copy(color = c)) }.clip(ClioShapes.pill).background(Color(c.toInt()))
                     .border(if (st.color == c) 2.dp else 1.dp, if (st.color == c) ClioColors.Clay else ClioColors.Hairline, ClioShapes.pill))
             }
-            item { Chip("Contorno", st.strokeWidth > 0f) { onStyle(if (st.strokeWidth > 0f) st.copy(strokeWidth = 0f) else st.copy(strokeWidth = 0.14f, strokeColor = if (st.color == 0xFF121212u) 0xFFFFFFFFu else 0xFF000000u)) } }
-            item { Chip("Fundo", st.background != 0u) { onStyle(st.copy(background = if (st.background != 0u) 0u else 0x99000000u)) } }
-            item { Chip("Sombra", st.shadow) { onStyle(st.copy(shadow = !st.shadow)) } }
+            item { Choice("Contorno", st.strokeWidth > 0f) { onStyle(if (st.strokeWidth > 0f) st.copy(strokeWidth = 0f) else st.copy(strokeWidth = 0.14f, strokeColor = if (st.color == 0xFF121212u) 0xFFFFFFFFu else 0xFF000000u)) } }
+            item { Choice("Fundo", st.background != 0u) { onStyle(st.copy(background = if (st.background != 0u) 0u else 0x99000000u)) } }
+            item { Choice("Sombra", st.shadow) { onStyle(st.copy(shadow = !st.shadow)) } }
         }
         ChipRow(uniffi.clio_ffi.TextAlign.entries, st.align, { when (it) { uniffi.clio_ffi.TextAlign.START -> "Esquerda"; uniffi.clio_ffi.TextAlign.CENTER -> "Centro"; else -> "Direita" } }) { onStyle(st.copy(align = it)) }
         ChipRow(TextAnim.entries, st.animIn, { "Entrada: " + animLabel(it) }) { onStyle(st.copy(animIn = it)) }
@@ -115,20 +114,11 @@ private fun TextStyleEditor(t: TextItem, onStyle: (TextStyle) -> Unit, onRetime:
     }
 }
 
-private fun animLabel(a: TextAnim) = when (a) { TextAnim.NONE -> "nenhuma"; TextAnim.FADE -> "suave"; TextAnim.POP -> "pop"; TextAnim.TYPEWRITER -> "digitando" }
+private fun animLabel(a: TextAnim) = when (a) { TextAnim.NONE -> "Nenhuma"; TextAnim.FADE -> "Suave"; TextAnim.POP -> "Pop"; TextAnim.TYPEWRITER -> "Digitação" }
 
 @Composable
 private fun <T> ChipRow(values: List<T>, selected: T, label: (T) -> String, onPick: (T) -> Unit) {
-    LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) { items(values) { v -> Chip(label(v), v == selected) { onPick(v) } } }
-}
-
-@Composable
-private fun Chip(text: String, selected: Boolean, onClick: () -> Unit) {
-    val bgc by animateColorAsState(if (selected) ClioColors.Clay else ClioColors.SurfaceRaised, ClioMotion.gentle(), label = "chip")
-    Box(Modifier.pressable(onClick = onClick).clip(ClioShapes.pill).background(bgc)
-        .border(1.dp, ClioColors.Hairline, ClioShapes.pill).padding(horizontal = 10.dp, vertical = 5.dp)) {
-        Text(text, style = MaterialTheme.typography.labelMedium, color = if (selected) ClioColors.OnClay else ClioColors.TextSecondary)
-    }
+    LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) { items(values) { v -> Choice(label(v), v == selected) { onPick(v) } } }
 }
 
 /** Timing handle: ±0,1 s steps. */
@@ -137,10 +127,10 @@ private fun Nudge(label: String, ms: Long, onDelta: (Long) -> Unit) {
     Row(verticalAlignment = Alignment.CenterVertically) {
         Text(label, style = MaterialTheme.typography.labelMedium, color = ClioColors.TextTertiary)
         Spacer(Modifier.width(6.dp))
-        Chip("−", false) { onDelta(-100) }
+        Choice("−", false) { onDelta(-100) }
         Text("%.1f s".format(java.util.Locale("pt", "BR"), ms / 1000f), style = MaterialTheme.typography.labelMedium, color = ClioColors.TextPrimary,
             modifier = Modifier.padding(horizontal = 6.dp))
-        Chip("+", false) { onDelta(100) }
+        Choice("+", false) { onDelta(100) }
     }
 }
 
