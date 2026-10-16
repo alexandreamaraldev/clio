@@ -83,7 +83,7 @@ class EditorE2ETest {
 
     private fun tool(label: String) {
         compose.onNodeWithTag("tools", useUnmergedTree = true).performScrollToNode(hasText(label))
-        compose.onNodeWithText(label, useUnmergedTree = true).performClick()
+        compose.onNode(hasText(label) and hasAnyAncestor(hasTestTag("tools")), useUnmergedTree = true).performClick()
         compose.waitForIdle()
     }
 
@@ -127,6 +127,14 @@ class EditorE2ETest {
         compose.onNodeWithText("Fechar").performClick()
         compose.waitForIdle()
         return uri
+    }
+
+    /** Home: scroll to the first draft card (it's below the fold) and optionally open it. */
+    private fun openDraftCard(check: Boolean) {
+        compose.waitUntil(10_000) { compose.onAllNodesWithTag("home").fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithTag("home").performScrollToNode(hasTestTag("draft-0"))
+        shot(if (check) "11-home-reopen" else "11-home")
+        if (check) compose.onNodeWithTag("draft-0").performClick()
     }
 
     // --- tests ---
@@ -217,14 +225,11 @@ class EditorE2ETest {
 
         // Leave the editor (flushes the draft), kill the activity and reopen the draft from Home.
         compose.onNodeWithContentDescription("Voltar").performClick()
-        compose.waitUntil(10_000) { compose.onAllNodesWithTag("draft-0", useUnmergedTree = true).fetchSemanticsNodes().isNotEmpty() }
-        Thread.sleep(1500) // autosave runs on the app scope
+        openDraftCard(check = false)
         scenario!!.close()
         QaHooks.ui = null
         scenario = ActivityScenario.launch(MainActivity::class.java)
-        compose.waitUntil(10_000) { compose.onAllNodesWithTag("draft-0", useUnmergedTree = true).fetchSemanticsNodes().isNotEmpty() }
-        shot("11-home")
-        compose.onNodeWithTag("draft-0", useUnmergedTree = true).performClick()
+        openDraftCard(check = true)
         waitUi("draft reopened") { it.hasMedia }
         shot("12-reopened")
         assertEquals(2, videoClips().size)
