@@ -41,11 +41,11 @@ data class ClioPalette(
 
 val DarkPalette = ClioPalette(
     isDark = true,
-    Ink = Color(0xFF0A0A0B), Surface = Color(0xFF111113), SurfaceRaised = Color(0xFF18181B),
-    SurfaceHigh = Color(0xFF222226), Glass = Color(0xB3141416),
+    Ink = Color(0xFF141416), Surface = Color(0xFF19191C), SurfaceRaised = Color(0xFF1F1F23),
+    SurfaceHigh = Color(0xFF29292E), Glass = Color(0xB3141416),
     Hairline = Color(0x14FFFFFF), HairlineStrong = Color(0x26FFFFFF),
-    TextPrimary = Color(0xFFEDEDED), TextSecondary = Color(0xFFA1A1AA), TextTertiary = Color(0xFF71717A),
-    Primary = Color(0xFFF5F5F4), OnPrimary = Color(0xFF0A0A0B),
+    TextPrimary = Color(0xFFF4F3F0), TextSecondary = Color(0xFFA1A1AA), TextTertiary = Color(0xFF71717A),
+    Primary = Color(0xFFF4F3F0), OnPrimary = Color(0xFF121212),
     Clay = Color(0xFFF2683C), ClaySoft = Color(0x29F2683C), ClayText = Color(0xFFF2683C), OnClay = Color(0xFF1A0B05), Scrim = Color(0x73000000),
     PreviewTop = Color(0xFF26262A), PreviewBottom = Color(0xFF151517), OnMedia = Color.White, MediaScrim = Color(0x73000000),
     TrackAudio = Color(0x3355A68A), CaptionHighlight = Color(0xFFFFD27A),
@@ -53,11 +53,11 @@ val DarkPalette = ClioPalette(
 
 val LightPalette = ClioPalette(
     isDark = false,
-    Ink = Color(0xFFFAFAF9), Surface = Color(0xFFFFFFFF), SurfaceRaised = Color(0xFFF4F4F5),
-    SurfaceHigh = Color(0xFFE9E9EB), Glass = Color(0xCCFFFFFF),
+    Ink = Color(0xFFF4F3F0), Surface = Color(0xFFFFFFFF), SurfaceRaised = Color(0xFFEDECE8),
+    SurfaceHigh = Color(0xFFE4E3DE), Glass = Color(0xCCF4F3F0),
     Hairline = Color(0x14000000), HairlineStrong = Color(0x24000000),
-    TextPrimary = Color(0xFF0A0A0B), TextSecondary = Color(0xFF52525B), TextTertiary = Color(0xFF8A8A93),
-    Primary = Color(0xFF111113), OnPrimary = Color(0xFFFAFAF9),
+    TextPrimary = Color(0xFF121212), TextSecondary = Color(0xFF52525B), TextTertiary = Color(0xFF8A8A93),
+    Primary = Color(0xFF121212), OnPrimary = Color(0xFFF4F3F0),
     Clay = Color(0xFFF2683C), ClaySoft = Color(0x1FF2683C), ClayText = Color(0xFFB8461E), OnClay = Color(0xFF1A0B05), Scrim = Color(0x40000000),
     PreviewTop = Color(0xFF2E2E32), PreviewBottom = Color(0xFF18181B), OnMedia = Color.White, MediaScrim = Color(0x73000000),
     TrackAudio = Color(0x4055A68A), CaptionHighlight = Color(0xFFFFD27A),
