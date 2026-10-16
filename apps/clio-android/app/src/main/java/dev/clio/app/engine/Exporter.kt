@@ -61,6 +61,12 @@ class Exporter(private val context: Context) {
     /** Diagnostics toggle used by the device QA export matrix. */
     internal var frameDrop = true
 
+    companion object {
+        const val BLUR_SIGMA = 14f
+        const val BLUR_STDDEVS = 1.5f
+        const val MAX_MUXER_GAP_MS = 60_000L
+    }
+
 
     suspend fun export(snap: Snapshot, spec: ExportSpec, captionStyle: CaptionStyle, onProgress: (Float) -> Unit): Uri {
         val out = File(context.cacheDir, "export-${System.currentTimeMillis()}.mp4")
@@ -97,7 +103,9 @@ class Exporter(private val context: Context) {
                 // Stretch to the canvas, blur it, and draw the sharp frame on top at its fitted size.
                 val (sx, sy) = Mix.fitScale(c.width.toInt(), c.height.toInt(), spec.width, spec.height)
                 video += Presentation.createForWidthAndHeight(spec.width, spec.height, Presentation.LAYOUT_STRETCH_TO_FIT)
-                video += GaussianBlurWithFrameOverlaid(spec.height / 40f, sx, sy)
+                // Kernel cost scales with sigma x stddevs per pass; keep it bounded so 1080p/4K stay real-time-ish
+                // on weak GPUs (a 48 px sigma stalled the muxer watchdog on emulators).
+                video += GaussianBlurWithFrameOverlaid(BLUR_SIGMA, BLUR_STDDEVS, sx, sy)
             } else {
                 video += Presentation.createForWidthAndHeight(spec.width, spec.height,
                     if (snap.fill) Presentation.LAYOUT_SCALE_TO_FIT_WITH_CROP else Presentation.LAYOUT_SCALE_TO_FIT)
@@ -128,6 +136,8 @@ class Exporter(private val context: Context) {
                 transformer = Transformer.Builder(context)
                     .setVideoMimeType(MimeTypes.VIDEO_H264)
                     .setAudioMimeType(MimeTypes.AUDIO_AAC)
+                    // Heavy effect chains (blur, 4K) on slow devices can legitimately exceed the 10 s default.
+                    .setMaxDelayBetweenMuxerSamplesMs(MAX_MUXER_GAP_MS)
                     .addListener(object : Transformer.Listener {
                         override fun onCompleted(composition: Composition, exportResult: ExportResult) { cont.resume(Unit) }
                         override fun onError(composition: Composition, exportResult: ExportResult, exportException: ExportException) {
