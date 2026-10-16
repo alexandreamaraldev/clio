@@ -7,14 +7,14 @@ and drafts live in the FilmCraft Rust engine (`crates/ffi-mobile`).
 
 Priority = how often a typical short-form editor touches it × how visible its absence is.
 
-## Phase 1: core cutting (in progress)
-- [x] Precise trim with left/right handles (frame-accurate snapping, ripple on the main track)
+## Phase 1: core cutting (shipped, awaiting device QA)
+- [x] Precise trim with left/right handles (snapped to a 30 fps grid, ripple on the main track)
 - [x] Drag to reorder clips on the main track
 - [x] Split, duplicate and delete
 - [x] Constant speed 0.1x to 10x (pitch kept)
-- [x] Per-clip volume (0 to 200%), fade in/out, mute
+- [x] Per-clip volume (0 to 200%; preview caps at 100%, export applies full gain), fade in/out, mute
 - [x] Aspect ratio 9:16, 1:1, 16:9, 4:5, with fit, fill and blurred-background fill
-- [x] Export settings: resolution 720p/1080p/4K (with encoder fallback) and 24/30/60 fps
+- [x] Export settings: resolution 720p/1080p/4K (with encoder fallback) and 24/30/60 fps (fps is capped by the source; no frame interpolation)
 
 ## Phase 2: layers and audio
 - [ ] Multi-track overlays and picture-in-picture (position, scale, rotation, opacity)
