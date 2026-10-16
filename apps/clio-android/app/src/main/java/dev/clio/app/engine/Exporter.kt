@@ -5,6 +5,7 @@ import android.content.Context
 import android.graphics.Color
 import android.graphics.Typeface
 import android.net.Uri
+import android.media.MediaMetadataRetriever
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
@@ -20,7 +21,7 @@ import androidx.media3.common.MimeTypes
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.effect.OverlayEffect
 import androidx.media3.effect.FrameDropEffect
-import androidx.media3.effect.GaussianBlurWithFrameOverlaid
+import androidx.media3.effect.BitmapOverlay
 import androidx.media3.effect.SpeedChangeEffect
 import androidx.media3.common.C
 import androidx.media3.common.audio.AudioProcessor
@@ -62,8 +63,6 @@ class Exporter(private val context: Context) {
     internal var frameDrop = true
 
     companion object {
-        const val BLUR_SIGMA = 14f
-        const val BLUR_STDDEVS = 1.5f
         const val MAX_MUXER_GAP_MS = 60_000L
     }
 
@@ -92,25 +91,19 @@ class Exporter(private val context: Context) {
                     .setStartPositionMs(c.inMs.toLong()).setEndPositionMs(c.inMs.toLong() + Mix.spanMs(c.durationMs.toLong(), speed)).build())
                 else setImageDurationMs(c.durationMs.toLong())
             }.build()
-            val overlays = ImmutableList.of<androidx.media3.effect.TextureOverlay>(
-                TimedTextOverlay(c.startMs.toLong(), texts, spec.height, centered = true, style = CaptionStyle.Bold),
-                TimedTextOverlay(c.startMs.toLong(), caps, spec.height, centered = false, style = style),
-            )
             val video = mutableListOf<androidx.media3.common.Effect>()
             if (speed != 1f) video += SpeedChangeEffect(speed)
             if (!isImage && frameDrop) video += FrameDropEffect.createDefaultFrameDropEffect(spec.fps.toFloat())
-            if (blur && c.width > 0u && c.height > 0u) {
-                // Stretch to the canvas, blur it, and draw the sharp frame on top at its fitted size.
-                val (sx, sy) = Mix.fitScale(c.width.toInt(), c.height.toInt(), spec.width, spec.height)
-                video += Presentation.createForWidthAndHeight(spec.width, spec.height, Presentation.LAYOUT_STRETCH_TO_FIT)
-                // Kernel cost scales with sigma x stddevs per pass; keep it bounded so 1080p/4K stay real-time-ish
-                // on weak GPUs (a 48 px sigma stalled the muxer watchdog on emulators).
-                video += GaussianBlurWithFrameOverlaid(BLUR_SIGMA, BLUR_STDDEVS, sx, sy)
-            } else {
-                video += Presentation.createForWidthAndHeight(spec.width, spec.height,
-                    if (snap.fill) Presentation.LAYOUT_SCALE_TO_FIT_WITH_CROP else Presentation.LAYOUT_SCALE_TO_FIT)
-            }
-            video += OverlayEffect(overlays)
+            video += Presentation.createForWidthAndHeight(spec.width, spec.height,
+                if (snap.fill) Presentation.LAYOUT_SCALE_TO_FIT_WITH_CROP else Presentation.LAYOUT_SCALE_TO_FIT)
+            val overlays = mutableListOf<androidx.media3.effect.TextureOverlay>()
+            // Blurred background: a pre-blurred still of the clip fills the letterbox bars (the centre is
+            // transparent, so the fitted video shows through). Same look as the preview, and cheap on any GPU.
+            // (Media3 1.4's GaussianBlurWithFrameOverlaid produced wrong output sizes / stalled on device QA.)
+            if (blur) blurredBackdrop(c, spec.width, spec.height)?.let { overlays += BitmapOverlay.createStaticBitmapOverlay(it) }
+            overlays += TimedTextOverlay(c.startMs.toLong(), texts, spec.height, centered = true, style = CaptionStyle.Bold)
+            overlays += TimedTextOverlay(c.startMs.toLong(), caps, spec.height, centered = false, style = style)
+            video += OverlayEffect(ImmutableList.copyOf(overlays))
             EditedMediaItem.Builder(mi)
                 .apply { if (isImage) { setDurationUs(c.durationMs.toLong() * 1000); setFrameRate(spec.fps) } }
                 .setEffects(Effects(audioChain(c, speed), video))
@@ -145,7 +138,8 @@ class Exporter(private val context: Context) {
                         }
                     }).build()
                 transformer.start(composition, out.path)
-                cont.invokeOnCancellation { transformer.cancel() }
+                // Cancellation can arrive on any thread (e.g. a timeout); Transformer is confined to Main.
+                cont.invokeOnCancellation { android.os.Handler(android.os.Looper.getMainLooper()).post { transformer.cancel() } }
             }
         } finally { poll.cancel() }
         onProgress(1f)
@@ -180,6 +174,31 @@ class Exporter(private val context: Context) {
         if (AudioGain.silent(c) || c.volume != 1f || c.fadeInMs > 0u || c.fadeOutMs > 0u)
             add(GainProcessor(c.durationMs.toLong(), c.volume, c.fadeInMs.toLong(), c.fadeOutMs.toLong(), AudioGain.silent(c)))
     }
+
+    /** Canvas-size bitmap: blurred, cover-cropped frame of [c] with a transparent hole where the fitted video sits. */
+    private fun blurredBackdrop(c: uniffi.clio_ffi.Clip, w: Int, h: Int): android.graphics.Bitmap? = runCatching {
+        val src: android.graphics.Bitmap = (if (MediaKind.isImage(context, c.source)) context.contentResolver.openInputStream(Uri.parse(c.source))!!.use {
+            android.graphics.BitmapFactory.decodeStream(it, null, android.graphics.BitmapFactory.Options().apply { inSampleSize = 8 })
+        } else MediaMetadataRetriever().run {
+            try { setDataSource(context, Uri.parse(c.source)); getFrameAtTime((c.inMs.toLong() + 100) * 1000, MediaMetadataRetriever.OPTION_CLOSEST_SYNC) } finally { release() }
+        }) ?: return null
+        val sw = src.width; val sh = src.height
+        // Blur by repeated down/up-scaling with bilinear filtering.
+        var small = android.graphics.Bitmap.createScaledBitmap(src, 24, (24f * sh / sw).toInt().coerceAtLeast(1), true)
+        repeat(2) { small = android.graphics.Bitmap.createScaledBitmap(android.graphics.Bitmap.createScaledBitmap(small, small.width * 2, small.height * 2, true), small.width, small.height, true) }
+        val out = android.graphics.Bitmap.createBitmap(w, h, android.graphics.Bitmap.Config.ARGB_8888)
+        val cv = android.graphics.Canvas(out)
+        val cover = maxOf(w.toFloat() / sw, h.toFloat() / sh)
+        val dw = sw * cover; val dh = sh * cover
+        val paint = android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG)
+        cv.drawBitmap(small, null, android.graphics.RectF((w - dw) / 2, (h - dh) / 2, (w + dw) / 2, (h + dh) / 2), paint)
+        cv.drawColor(0x33000000)
+        val (fx, fy) = Mix.fitScale(sw, sh, w, h)
+        val hw = w * fx / 2; val hh = h * fy / 2
+        cv.drawRect(w / 2f - hw, h / 2f - hh, w / 2f + hw, h / 2f + hh, android.graphics.Paint().apply { xfermode = android.graphics.PorterDuffXfermode(android.graphics.PorterDuff.Mode.CLEAR) })
+        if (src !== small) src.recycle()
+        out
+    }.getOrNull()
 
     private data class Timed(val startMs: Long, val endMs: Long, val text: String)
 
