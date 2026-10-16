@@ -142,13 +142,13 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
                 t.clips.map { c -> UiClip(c.name, c.startMs.toFloat() / 1000f, c.durationMs.toFloat() / 1000f, c.id.toLong(), c.source, c.inMs.toFloat() / 1000f,
                     c.sourceMs.toFloat() / 1000f, c.speed, c.volume, c.fadeInMs.toFloat() / 1000f, c.fadeOutMs.toFloat() / 1000f, c.muted) })
         }
-        val caps = s.captions.map { Engine.Cap(it.startMs.toLong(), it.endMs.toLong(), it.text) }
+        val caps = s.captions.map { Engine.Cap(it.startMs.toLong(), it.endMs.toLong(), it.text, it.words) }
         val withCaps = if (caps.isEmpty()) uiTracks else uiTracks + UiTrack("Legendas", "text",
             caps.mapIndexed { i, c -> UiClip("Aa  " + c.text, c.startMs / 1000f, (c.endMs - c.startMs).coerceAtLeast(1) / 1000f, -1L - i) })
         ui = ui.copy(title = s.summary.name, tracks = withCaps, durationS = s.summary.durationMs.toFloat() / 1000f, captions = caps,
             hasMedia = s.tracks.any { it.kind == TrackKind.VIDEO && it.clips.isNotEmpty() }, canUndo = s.canUndo, canRedo = s.canRedo,
-            loading = false, fill = s.fill, blurBg = s.blurBg, canvasW = s.summary.width.toInt(), canvasH = s.summary.height.toInt(),
-            texts = s.tracks.filter { it.kind == TrackKind.TEXT }.flatMap { it.clips }.map { TextItem(it.id.toLong(), it.name, it.startMs.toLong(), (it.startMs + it.durationMs).toLong()) },
+            loading = false, captionLanguage = s.speechLanguage, fill = s.fill, blurBg = s.blurBg, canvasW = s.summary.width.toInt(), canvasH = s.summary.height.toInt(),
+            texts = s.tracks.filter { it.kind == TrackKind.TEXT }.flatMap { it.clips }.map { c -> TextItem(c.id.toLong(), c.name, c.startMs.toLong(), (c.startMs + c.durationMs).toLong(), s.textStyles.firstOrNull { it.clipId == c.id }?.style ?: StyledText.defaultStyle) },
             music = s.tracks.firstOrNull { it.kind == TrackKind.AUDIO }?.clips?.firstOrNull()?.name,
             layers = LayersMapping.layers(getApplication(), s), cuts = LayersMapping.cuts(s))
         lastSnap = s
@@ -303,6 +303,8 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
     }
 
     override fun setCaptionStyle(style: CaptionStyle) { ui = ui.copy(captionStyle = style) }
+    /** Saved in the draft (engine), so it survives reopening the project. */
+    override fun setCaptionLanguage(language: String?) = launchEdit { setSpeechLanguage(language) }.let { }
 
     // --- Canvas: aspect ratio + framing ---
     override fun toggleFill() = launchEdit(rebuildPlayer = false) {
@@ -348,6 +350,12 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
         }
     }
     override fun editText(id: Long, text: String) = launchEdit { renameClip(id.toULong(), text) }.let { }
+    override fun setTextStyle(id: Long, style: uniffi.clio_ffi.TextStyle) = launchEdit { runCatching { setTextStyle(id.toULong(), style) } }.let { }
+    override fun retimeCaption(index: Int, startMs: Long, endMs: Long) = launchEdit {
+        Engine.retimeCaption(this, index, startMs, endMs).onFailure { android.util.Log.w("Clio", "retimeCaption($index, $startMs, $endMs) failed", it) }
+    }.let { }
+    override fun retimeText(id: Long, startMs: Long, endMs: Long) =
+        launchEdit { runCatching { retimeText(id.toULong(), startMs.coerceAtLeast(0).toULong(), (endMs - startMs).coerceAtLeast(1).toULong()) } }.let { }
 
     // --- Music ---
     override fun pickMusic() { _events.tryEmit(EditorEvent.PickMusic) }
@@ -394,12 +402,13 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
         } else launchEdit(rebuildPlayer = true) { target(clipId)?.let { removeClip(it) } }
     }
     override fun editCaptions(caps: List<Engine.Cap>) {
-        launchEdit { setCaptions(caps.map { Caption(it.startMs.toULong(), it.endMs.toULong(), it.text) }) }
+        launchEdit { setCaptions(caps.map { it.toFfi() }) }
     }
 
     override fun generateCaptions() {
         if (captionJob?.isActive == true) return
         captionJob = viewModelScope.launch {
+            val lang = ui.captionLanguage // null = Whisper auto-detect
             val app = getApplication<Application>()
             try {
                 val modelId = uniffi.clio_ffi.defaultSpeechModel()
@@ -422,7 +431,7 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
                     val job = coroutineContext.job
                     val caps = try {
                         withContext(Dispatchers.Default) {
-                            uniffi.clio_ffi.transcribeCaptions(models.modelsDir.path, modelId, pcm.path, null, object : uniffi.clio_ffi.TranscribeProgress {
+                            uniffi.clio_ffi.transcribeCaptions(models.modelsDir.path, modelId, pcm.path, lang, object : uniffi.clio_ffi.TranscribeProgress {
                                 override fun onProgress(fraction: Float, status: String): Boolean {
                                     // Marshal to Main; never touch UI state from the engine thread.
                                     viewModelScope.launch(Dispatchers.Main) { ui = ui.copy(captionStatus = CaptionStatus.Transcribing((i + fraction) / n)) }
@@ -433,7 +442,8 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
                     } finally { pcm.delete() }
                     out += caps.map {
                         val end = minOf(it.endMs, c.durationMs)
-                        it.copy(startMs = it.startMs + c.startMs, endMs = end + c.startMs)
+                        it.copy(startMs = it.startMs + c.startMs, endMs = end + c.startMs,
+                            words = it.words.map { w -> w.copy(startMs = minOf(w.startMs, end) + c.startMs, endMs = minOf(w.endMs, end) + c.startMs) })
                     }.filter { it.endMs > it.startMs }
                 }
                 ui = ui.copy(captionStatus = CaptionStatus.Idle)

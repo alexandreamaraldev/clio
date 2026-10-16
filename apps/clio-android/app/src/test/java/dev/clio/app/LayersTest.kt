@@ -26,7 +26,7 @@ class LayersTest {
     private fun snap(main: List<Clip>, vararg rows: List<Clip>) = Snapshot(
         ProjectSummary("p", 1080u, 1920u, main.sumOf { it.durationMs.toLong() }.toULong(), (1 + rows.size).toUInt(), 0u),
         listOf(Track(1uL, TrackKind.VIDEO, "V", main)) + rows.mapIndexed { i, r -> Track((10 + i).toULong(), TrackKind.OVERLAY, "Camada ${i + 1}", r) },
-        emptyList(), false, false, false, false,
+        emptyList(), emptyList(), null, false, false, false, false,
     )
 
     @Test fun incomingTransitionComesFromPreviousClip() {
