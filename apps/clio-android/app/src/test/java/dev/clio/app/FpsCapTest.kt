@@ -36,5 +36,22 @@ class FpsCapTest {
         assertEquals(24.0, kept * 1e6 / (pts.last() - pts.first()), 1.0)
     }
 
+    /** 60 -> 30 with ±4 ms jitter: exactly every other frame, never two neighbours. */
+    @Test fun jitteredSixtyToThirtyNoStutter() {
+        val r = java.util.Random(3); var next = Long.MIN_VALUE; val kept = mutableListOf<Int>()
+        for (i in 0 until 600) {
+            val pts = i * 16_667L + r.nextInt(8_001) - 4_000
+            val (k, nx) = FpsCap.Decimator.keep(pts, next, 33_333)
+            if (k) { kept += i; next = nx }
+        }
+        assertEquals(300.0, kept.size.toDouble(), 3.0)
+        assertEquals(true, kept.zipWithNext().all { (a, b) -> b - a >= 2 })
+    }
+
+    @Test fun speedCountsTowardRate() {
+        assertEquals(true, FpsCap.needed(30f, 30f, speed = 2f))
+        assertEquals(false, FpsCap.needed(60f, 30f, speed = 0.5f))
+    }
+
     @Test fun belowTargetKeepsAll() = assertEquals(180, kept(30.0, 60f, 6))
 }

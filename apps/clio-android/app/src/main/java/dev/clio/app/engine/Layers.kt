@@ -153,7 +153,14 @@ object Layers {
                 val d = decoder ?: runCatching { SequentialVideoDecoder(context, Uri.parse(c.source), targetW, targetH) }
                     .onFailure { failed = true; android.util.Log.w("Clio", "layer decoder unavailable, using retriever", it) }
                     .getOrNull()?.also { decoder = it }
-                if (d != null) return runCatching { d.frameAt(srcUs) }.getOrElse { d.bitmap }
+                if (d != null) {
+                    runCatching { d.frameAt(srcUs) }.onSuccess { return it }.onFailure {
+                        // Mid-stream codec error: drop the decoder and continue on the retriever path.
+                        android.util.Log.w("Clio", "layer decode failed mid-stream, using retriever", it)
+                        fallbackFrame = d.bitmap.copy(Bitmap.Config.RGB_565, false)
+                        endDecodes += d.decoded; d.close(); decoder = null; failed = true
+                    }
+                }
             }
             return fallback(srcUs)
         }

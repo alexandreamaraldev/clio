@@ -32,15 +32,17 @@ internal class FpsCap(targetFps: Float) : GlEffect {
 
     companion object {
         /** Sources up to 5% above the target (e.g. VFR ~30 exported at 30) are left alone. */
-        fun needed(sourceFps: Float?, targetFps: Float): Boolean = sourceFps == null || sourceFps > targetFps * 1.05f
+        /** [speed] multiplies the delivered rate: 30 fps at 2x arrives as 60 fps of output time. */
+        fun needed(sourceFps: Float?, targetFps: Float, speed: Float = 1f): Boolean = sourceFps == null || sourceFps * speed > targetFps * 1.05f
 
-        /** Average frame rate from the first ~2 s of real sample times (VFR-safe), or null. */
-        fun sourceFps(context: Context, uri: android.net.Uri): Float? = runCatching {
+        /** Average frame rate over ~2 s of real sample times from [fromUs] (the trim in-point) (VFR-safe), or null. */
+        fun sourceFps(context: Context, uri: android.net.Uri, fromUs: Long = 0): Float? = runCatching {
             val e = android.media.MediaExtractor()
             try {
                 e.setDataSource(context, uri, null)
                 val t = (0 until e.trackCount).first { e.getTrackFormat(it).getString(android.media.MediaFormat.KEY_MIME)?.startsWith("video/") == true }
                 e.selectTrack(t)
+                if (fromUs > 0) e.seekTo(fromUs, android.media.MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
                 var n = 0; var first = -1L; var last = -1L
                 while (n < 120) {
                     val ts = e.sampleTime; if (ts < 0) break
@@ -55,16 +57,18 @@ internal class FpsCap(targetFps: Float) : GlEffect {
 
     internal object Decimator {
         /**
-         * (keep, next slot). Slots are [stepUs] apart; a frame within half a step of
-         * the next slot is kept, so jittery VFR footage at ~the target rate passes untouched.
+         * (keep, next slot). Slots are [stepUs] apart; a frame within a quarter step of
+         * the next slot is kept, so jitter doesn't drop on-grid frames (half a step would
+         * let 60 -> 30 keep neighbouring frames and stutter).
          */
         fun keep(ptsUs: Long, nextUs: Long, stepUs: Long): Pair<Boolean, Long> {
             if (nextUs == Long.MIN_VALUE) return true to ptsUs + stepUs
-            val half = stepUs / 2
-            if (ptsUs < nextUs - half) return false to nextUs
-            // Late frames pull the grid with them (VFR drift), so a slightly slow source never stutters.
-            var n = maxOf(nextUs + stepUs, ptsUs + half)
-            while (n - half <= ptsUs) n += stepUs
+            val tol = stepUs / 4
+            if (ptsUs < nextUs - tol) return false to nextUs
+            // Fixed grid (sources near the target are skipped by [needed], so drift doesn't matter);
+            // a gap in the source jumps the grid forward.
+            var n = nextUs + stepUs
+            while (n - tol <= ptsUs) n += stepUs
             return true to n
         }
     }

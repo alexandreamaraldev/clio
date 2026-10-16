@@ -110,7 +110,7 @@ class Exporter(private val context: Context) {
             val incoming = Layers.incoming(video, index)
             val video = mutableListOf<androidx.media3.common.Effect>()
             if (speed != 1f) video += SpeedChangeEffect(speed)
-            if (!isImage && frameDrop && FpsCap.needed(FpsCap.sourceFps(context, Uri.parse(c.source)), spec.fps.toFloat())) video += FpsCap(spec.fps.toFloat())
+            if (!isImage && frameDrop && FpsCap.needed(FpsCap.sourceFps(context, Uri.parse(c.source), c.inMs.toLong() * 1000), spec.fps.toFloat(), speed)) video += FpsCap(spec.fps.toFloat())
             video += Presentation.createForWidthAndHeight(spec.width, spec.height,
                 if (snap.fill) Presentation.LAYOUT_SCALE_TO_FIT_WITH_CROP else Presentation.LAYOUT_SCALE_TO_FIT)
             // Blurred background: a pre-blurred still of the clip fills the letterbox bars (the centre is
