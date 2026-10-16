@@ -83,7 +83,8 @@ class Exporter(private val context: Context) {
         val totalMs = snap.summary.durationMs.toLong()
         val blur = snap.blurBg && !snap.fill
 
-        val items = video.map { c ->
+        val layers = Layers.overlayClips(snap)
+        val items = video.mapIndexed { index, c ->
             val isImage = MediaKind.isImage(context, c.source)
             val speed = if (isImage) 1f else c.speed
             val mi = MediaItem.Builder().setUri(c.source).apply {
@@ -91,16 +92,23 @@ class Exporter(private val context: Context) {
                     .setStartPositionMs(c.inMs.toLong()).setEndPositionMs(c.inMs.toLong() + Mix.spanMs(c.durationMs.toLong(), speed)).build())
                 else setImageDurationMs(c.durationMs.toLong())
             }.build()
+            // Overlay/PIP layers that overlap this item (bottom row first); drawn after the blur backdrop, before text.
+            val layerOverlays = layers.filter { it.startMs < c.startMs + c.durationMs && it.startMs + it.durationMs > c.startMs }
+                .map { Layers.LayerOverlay(context, it, c.startMs.toLong(), spec.width, spec.height, MediaKind.isImage(context, it.source), spec.fps) }
+            val incoming = Layers.incoming(video, index)
             val video = mutableListOf<androidx.media3.common.Effect>()
             if (speed != 1f) video += SpeedChangeEffect(speed)
             if (!isImage && frameDrop) video += FrameDropEffect.createDefaultFrameDropEffect(spec.fps.toFloat())
             video += Presentation.createForWidthAndHeight(spec.width, spec.height,
                 if (snap.fill) Presentation.LAYOUT_SCALE_TO_FIT_WITH_CROP else Presentation.LAYOUT_SCALE_TO_FIT)
-            val overlays = mutableListOf<androidx.media3.effect.TextureOverlay>()
             // Blurred background: a pre-blurred still of the clip fills the letterbox bars (the centre is
             // transparent, so the fitted video shows through). Same look as the preview, and cheap on any GPU.
             // (Media3 1.4's GaussianBlurWithFrameOverlaid produced wrong output sizes / stalled on device QA.)
-            if (blur) blurredBackdrop(c, spec.width, spec.height)?.let { overlays += BitmapOverlay.createStaticBitmapOverlay(it) }
+            // It is part of the clip: applied before the transition effects so Slide/Zoom move clip + backdrop together.
+            if (blur) blurredBackdrop(c, spec.width, spec.height)?.let { video += OverlayEffect(ImmutableList.of(BitmapOverlay.createStaticBitmapOverlay(it))) }
+            video += Layers.exportEffects(c, incoming)
+            val overlays = mutableListOf<androidx.media3.effect.TextureOverlay>()
+            overlays += layerOverlays
             overlays += TimedTextOverlay(c.startMs.toLong(), texts, spec.height, centered = true, style = CaptionStyle.Bold)
             overlays += TimedTextOverlay(c.startMs.toLong(), caps, spec.height, centered = false, style = style)
             video += OverlayEffect(ImmutableList.copyOf(overlays))

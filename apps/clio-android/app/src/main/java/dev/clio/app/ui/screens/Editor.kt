@@ -61,6 +61,7 @@ private val tools = listOf(
     Tool(Icons.Outlined.AspectRatio, "Formato"), Tool(Icons.Outlined.ContentCopy, "Duplicar"),
     Tool(Icons.Outlined.Tune, "Ajustes", ready = false), Tool(Icons.Outlined.FilterVintage, "Filtros", ready = false),
     Tool(Icons.Outlined.AutoAwesome, "Efeitos", ready = false),
+    Tool(Icons.Outlined.Layers, "Camadas"), Tool(Icons.Outlined.Compare, "Transição"),
 )
 const val TOOL_SPLIT = 0
 const val TOOL_TEXT = 1
@@ -70,7 +71,9 @@ const val TOOL_SPEED = 4
 const val TOOL_VOLUME = 5
 const val TOOL_FORMAT = 6
 const val TOOL_DUPLICATE = 7
-private val panelTools = setOf(TOOL_TEXT, TOOL_MUSIC, TOOL_CAPTIONS, TOOL_SPEED, TOOL_VOLUME, TOOL_FORMAT)
+const val TOOL_LAYERS = 11
+const val TOOL_TRANSITION = 12
+private val panelTools = setOf(TOOL_TEXT, TOOL_MUSIC, TOOL_CAPTIONS, TOOL_SPEED, TOOL_VOLUME, TOOL_FORMAT, TOOL_LAYERS, TOOL_TRANSITION)
 
 @Immutable
 data class TextItem(val id: Long, val text: String, val startMs: Long, val endMs: Long)
@@ -98,6 +101,8 @@ data class EditorUi(
     val texts: List<TextItem> = emptyList(),
     val music: String? = null,
     val captionStyle: CaptionStyle = CaptionStyle.Clean,
+    val layers: List<UiLayer> = emptyList(),
+    val cuts: List<UiCut> = emptyList(),
 )
 
 interface EditorActions {
@@ -125,6 +130,9 @@ interface EditorActions {
     fun setAudio(clipId: Long?, volume: Float, fadeInS: Float, fadeOutS: Float, muted: Boolean) {}
     fun setAspect(a: dev.clio.app.engine.Aspect) {}
     fun setFraming(fill: Boolean, blur: Boolean) {}
+    fun addLayer() {}
+    fun setLayerTransform(clipId: Long, t: UiTransform) {}
+    fun setTransition(clipId: Long, style: TransitionStyle, durS: Float) {}
 }
 
 object NoActions : EditorActions
@@ -170,6 +178,7 @@ fun EditorScreen(
             ) {
                 if (ui.blurBg && !ui.fill) BlurBackdrop(ui.tracks.firstOrNull { it.kind == "video" }?.clips.orEmpty(), playhead)
                 preview(ui.fill)
+                LayerStack(ui.layers, playhead, ui.playing, selectedClip, { selectedClip = it; selectedTool = TOOL_LAYERS }, actions::setLayerTransform)
                 TextLayer(ui.texts, playhead, Modifier.align(Alignment.Center).padding(Space.md))
                 if (ui.hasMedia) Text(when { ui.fill -> "Preencher"; ui.blurBg -> "Desfoque"; else -> "Ajustar" }, style = MaterialTheme.typography.labelSmall, color = ClioColors.OnMedia,
                     modifier = Modifier.align(Alignment.TopEnd).padding(10.dp).pressable(onClick = actions::toggleFill)
@@ -218,6 +227,13 @@ fun EditorScreen(
                 TOOL_MUSIC -> MusicPanel(ui.music, actions::pickMusic, actions::removeMusic)
                 TOOL_SPEED -> SpeedPanel(target) { actions.setSpeed(target?.id, it) }
                 TOOL_VOLUME -> VolumePanel(target) { v, fi, fo, m -> actions.setAudio(target?.id, v, fi, fo, m) }
+                TOOL_LAYERS -> LayersPanel(ui.layers.firstOrNull { it.id == selectedClip }, actions::addLayer, actions::setLayerTransform) {
+                    actions.setLayerTransform(it, UiTransform(0.45f, 0.5f, 0.4f, 0f, 1f))
+                }
+                TOOL_TRANSITION -> {
+                    val cut = ui.cuts.firstOrNull { it.clipId == selectedClip } ?: ui.cuts.minByOrNull { kotlin.math.abs(it.atS - playhead()) }
+                    TransitionPanel(ui.cuts, cut, { selectedClip = it.clipId; actions.scrub((it.atS - 0.8f).coerceAtLeast(0f)) }, actions::setTransition)
+                }
                 TOOL_FORMAT -> FormatPanel(ui.canvasW, ui.canvasH, ui.fill, ui.blurBg, actions::setAspect, actions::setFraming)
                 else -> Timeline(ui.tracks, ui.durationS, playhead, ui.playing, selectedClip, { selectedClip = it }, actions::scrub, actions::addClip,
                     onTrim = actions::trim, onMove = actions::move)

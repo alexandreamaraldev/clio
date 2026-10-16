@@ -82,6 +82,10 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
     private val _events = MutableSharedFlow<EditorEvent>(extraBufferCapacity = 4)
     val events: SharedFlow<EditorEvent> = _events
 
+    /** Main-track transition look for the preview (see Layers.PreviewLook). */
+    private val previewLook = Layers.PreviewLook()
+    /** Next picker result goes to an overlay layer instead of the main track. */
+    private var pickForLayer = false
     val player: ExoPlayer = ExoPlayer.Builder(app).build().apply {
         addListener(object : Player.Listener {
             override fun onIsPlayingChanged(isPlaying: Boolean) {
@@ -91,6 +95,7 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) { applyItemParams() }
             override fun onPlaybackStateChanged(state: Int) { if (state == Player.STATE_ENDED) { pause(); seekTimeline(0f) } }
         })
+        setVideoEffects(previewLook.effects)
     }
     /** Music preview runs on its own player, slaved to the timeline. */
     val musicPlayer: ExoPlayer = ExoPlayer.Builder(app).build()
@@ -134,7 +139,7 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
 
     private fun apply(s: Snapshot, rebuildPlayer: Boolean) {
         val uiTracks = s.tracks.filter { it.clips.isNotEmpty() || it.kind == TrackKind.VIDEO }.map { t ->
-            UiTrack(t.name, when (t.kind) { TrackKind.VIDEO -> "video"; TrackKind.AUDIO -> "audio"; TrackKind.TEXT -> "text"; TrackKind.EFFECT -> "fx" },
+            UiTrack(t.name, when (t.kind) { TrackKind.VIDEO -> "video"; TrackKind.AUDIO -> "audio"; TrackKind.TEXT -> "text"; TrackKind.EFFECT -> "fx"; TrackKind.OVERLAY -> "overlay" },
                 t.clips.map { c -> UiClip(c.name, c.startMs.toFloat() / 1000f, c.durationMs.toFloat() / 1000f, c.id.toLong(), c.source, c.inMs.toFloat() / 1000f,
                     c.sourceMs.toFloat() / 1000f, c.speed, c.volume, c.fadeInMs.toFloat() / 1000f, c.fadeOutMs.toFloat() / 1000f, c.muted) })
         }
@@ -145,7 +150,8 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
             hasMedia = s.tracks.any { it.kind == TrackKind.VIDEO && it.clips.isNotEmpty() }, canUndo = s.canUndo, canRedo = s.canRedo,
             loading = false, fill = s.fill, blurBg = s.blurBg, canvasW = s.summary.width.toInt(), canvasH = s.summary.height.toInt(),
             texts = s.tracks.filter { it.kind == TrackKind.TEXT }.flatMap { it.clips }.map { TextItem(it.id.toLong(), it.name, it.startMs.toLong(), (it.startMs + it.durationMs).toLong()) },
-            music = s.tracks.firstOrNull { it.kind == TrackKind.AUDIO }?.clips?.firstOrNull()?.name)
+            music = s.tracks.firstOrNull { it.kind == TrackKind.AUDIO }?.clips?.firstOrNull()?.name,
+            layers = LayersMapping.layers(getApplication(), s), cuts = LayersMapping.cuts(s))
         lastSnap = s
         if (rebuildPlayer) rebuildPlaylist(s) else refreshClipCache(s)
     }
@@ -178,6 +184,7 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
         val c = videoClips.getOrNull(idx)
         val local = (player.currentPosition / (c?.speed ?: 1f)).toLong()
         playheadState.floatValue = (clipStarts.getOrElse(idx) { 0L } + local) / 1000f
+        updateLook(idx, local)
         if (c != null) player.volume = Mix.gain(local, c.durationMs.toLong(), c.volume, c.fadeInMs.toLong(), c.fadeOutMs.toLong(), c.muted).coerceAtMost(1f)
         musicClip?.let { m ->
             val t = (playheadState.floatValue * 1000).toLong() - m.startMs.toLong()
@@ -192,6 +199,11 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
         player.volume = if (c.muted) 0f else c.volume.coerceAtMost(1f)
     }
 
+    private fun updateLook(idx: Int, localMs: Long) {
+        val c = videoClips.getOrNull(idx) ?: return
+        previewLook.look = Layers.look(c, Layers.incoming(videoClips, idx), localMs)
+    }
+
     private fun syncMusic() {
         val m = musicClip ?: return
         val t = (playheadState.floatValue * 1000).toLong() - m.startMs.toLong()
@@ -204,6 +216,7 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
         if (clipStarts.isNotEmpty()) player.seekTo(idx, Mix.spanMs(ms - clipStarts[idx], videoClips.getOrNull(idx)?.speed ?: 1f))
         applyItemParams()
         playheadState.floatValue = s
+        if (clipStarts.isNotEmpty()) updateLook(idx, ms - clipStarts[idx])
         syncMusic()
     }
 
@@ -228,6 +241,19 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
         }
         if (infos.isEmpty()) return@launch
         val app = getApplication<Application>()
+        if (pickForLayer) {
+            pickForLayer = false
+            val at = (playheadState.floatValue * 1000).toLong().toULong()
+            apply(edit {
+                infos.forEach {
+                    val still = MediaKind.isImage(app, it.uri)
+                    val len = if (still) 3000uL else it.durationMs.toULong()
+                    val id = addOverlay(it.name, it.uri, at, len)
+                    setClipSourceInfo(id, if (still) 0u else it.durationMs.toULong(), it.width.coerceAtLeast(0).toUInt(), it.height.coerceAtLeast(0).toUInt())
+                }
+            }, rebuildPlayer = false)
+            return@launch
+        }
         apply(edit {
             infos.forEach {
                 val id = appendClip(videoTrack, it.name, it.uri, it.durationMs.toULong())
@@ -326,7 +352,15 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
     }.let { }
     override fun playPause() { if (player.isPlaying) player.pause() else if (ui.hasMedia) player.play() }
     override fun scrub(s: Float) { if (player.isPlaying) player.pause(); seekTimeline(s.coerceIn(0f, ui.durationS)) }
-    override fun addClip() { _events.tryEmit(EditorEvent.PickMedia) }
+    override fun addClip() { pickForLayer = false; _events.tryEmit(EditorEvent.PickMedia) }
+
+    // --- Layers (PIP) and transitions ---
+    override fun addLayer() { player.pause(); pickForLayer = true; _events.tryEmit(EditorEvent.PickMedia) }
+    override fun setLayerTransform(clipId: Long, t: UiTransform) =
+        launchEdit { runCatching { setClipTransform(clipId.toULong(), LayersMapping.transform(t)) } }.let { }
+    override fun setTransition(clipId: Long, style: TransitionStyle, durS: Float) = launchEdit(rebuildPlayer = false) {
+        runCatching { setTransition(clipId.toULong(), LayersMapping.kind(style), (durS * 1000).toLong().coerceAtLeast(0).toULong()) }
+    }.let { }
     override fun undo() = launchEdit(rebuildPlayer = true) { undo() }.let { }
     override fun redo() = launchEdit(rebuildPlayer = true) { redo() }.let { }
     override fun split(clipId: Long?) {
