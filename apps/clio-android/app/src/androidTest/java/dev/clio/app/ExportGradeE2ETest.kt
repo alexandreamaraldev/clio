@@ -49,11 +49,10 @@ class ExportGradeE2ETest {
 
     /** (mean chroma spread max-min, mean luma) over the centre of the frame at [ms]. */
     private fun stats(uri: Uri, ms: Long): Pair<Double, Double> {
-        val m = MediaMetadataRetriever(); m.setDataSource(ctx, uri)
-        val f = m.getFrameAtTime(ms * 1000, MediaMetadataRetriever.OPTION_CLOSEST)!!.copy(Bitmap.Config.ARGB_8888, false); m.release()
+        val f = Bt709Frame.at(ctx, uri, ms * 1000)
         var spread = 0.0; var luma = 0.0; var n = 0
         for (y in f.height / 4 until f.height * 3 / 4 step 4) for (x in f.width / 4 until f.width * 3 / 4 step 4) {
-            val p = f.getPixel(x, y); val r = (p shr 16) and 255; val g = (p shr 8) and 255; val b = p and 255
+            val (r, g, b) = f.rgb(x, y)
             spread += maxOf(r, g, b) - minOf(r, g, b); luma += 0.2126 * r + 0.7152 * g + 0.0722 * b; n++
         }
         return spread / n to luma / n
@@ -102,11 +101,7 @@ class ExportGradeE2ETest {
     }
 
     /** Mean RGB of a 48x48 patch at the centre of swatch band [i]. */
-    private fun patch(f: Bitmap, i: Int): IntArray {
-        val cx = f.width / 2; val cy = f.height * (2 * i + 1) / 8; var r = 0; var g = 0; var b = 0; var n = 0
-        for (y in cy - 24 until cy + 24) for (x in cx - 24 until cx + 24) { val p = f.getPixel(x, y); r += (p shr 16) and 255; g += (p shr 8) and 255; b += p and 255; n++ }
-        return intArrayOf(r / n, g / n, b / n)
-    }
+    private fun patch(f: Bt709Frame, i: Int): IntArray = f.patch(f.width / 2, f.height * (2 * i + 1) / 8, 24)
 
     private fun reference(rgb: Int, g: uniffi.clio_ffi.ColorGrade, lib: Grades.Library): IntArray {
         val c = floatArrayOf(((rgb shr 16) and 255) / 255f, ((rgb shr 8) and 255) / 255f, (rgb and 255) / 255f)
@@ -139,11 +134,12 @@ class ExportGradeE2ETest {
         val uri = runBlocking { withTimeout(240_000) { Exporter(ctx).export(p.snapshot(), ExportSpec("grade-ref", 720, 1280, 30), CaptionStyle.Clean) {} } }
 
         val lib = Grades.Library(ctx); val tol = 6
-        val m = MediaMetadataRetriever(); m.setDataSource(ctx, uri)
+        // Raw Y'CbCr decoded with the stream's tagged matrix (Bt709Frame, validated by Bt709FrameGuardTest),
+        // not MediaMetadataRetriever, whose conversion lifts grey on the emulator.
         val fails = mutableListOf<String>()
-        try {
+        run {
             cases.forEachIndexed { k, (name, g) ->
-                val f = m.getFrameAtTime((k * 1000L + 500) * 1000, MediaMetadataRetriever.OPTION_CLOSEST)!!.copy(Bitmap.Config.ARGB_8888, false)
+                val f = Bt709Frame.at(ctx, uri, k * 1_000_000L + 500_000)
                 swatches.forEachIndexed { i, rgb ->
                     val got = patch(f, i); val want = reference(rgb, g, lib)
                     val err = (0..2).maxOf { kotlin.math.abs(got[it] - want[it]) }
@@ -153,7 +149,7 @@ class ExportGradeE2ETest {
                     if (err > (if (name == "neutral") NEUTRAL_TOL else tol)) fails += line
                 }
             }
-        } finally { m.release() }
+        }
         assertTrue("${fails.size} patches off by > $tol:\n" + fails.joinToString("\n"), fails.isEmpty())
     }
 
@@ -222,16 +218,20 @@ class ExportGradeE2ETest {
     }
 
     /**
-     * Outcome (b) contract, from Timeline's fallback chain in b58ddf0 (Exporter.kt): after CODEC -> GL ->
-     * AS_SDR -> DROP all fail, export throws IllegalStateException([HDR_ERROR]), which EditorController
-     * shows on the export sheet as ExportState.Failed.message (cause chain joined with " ← "). No testTag
-     * exists, so the exact sentence is the stable match.
+     * Outcome (b) contract, from Timeline's d1a5faf: the export sheet shows exactly one pt-BR sentence
+     * (UserFacingExportError.message) in the node tagged "export_error"; the cause chain only goes to Log.
      */
     private val HDR_ERROR = "Não foi possível exportar este vídeo HDR neste aparelho. Tente remover os filtros dos clipes."
 
     private fun assertPtBrHdrError(msg: String, label: String) {
-        assertTrue("$label: export failed with something other than the pt-BR HDR error: \"$msg\"", msg.startsWith(HDR_ERROR))
-        if (msg != HDR_ERROR) android.util.Log.w("ClioQA", "CLIO-QA grade-hdr $label: raw cause chain appended in UI: \"${msg.removePrefix(HDR_ERROR)}\"")
+        assertEquals("$label: ExportState.Failed message", HDR_ERROR, msg)
+        val node = compose.onNodeWithTag("export_error", useUnmergedTree = true).assertExists().fetchSemanticsNode()
+        val shown = node.config.getOrElse(androidx.compose.ui.semantics.SemanticsProperties.Text) { emptyList() }.joinToString("") { it.text }
+        assertEquals("$label: text on screen in export_error (no cause chain allowed)", HDR_ERROR, shown)
+        compose.onNodeWithTag("export_error", useUnmergedTree = true).assertIsDisplayed()
+        // Nothing else on screen may carry the raw chain either.
+        for (raw in listOf("←", "Exception", "GL_EXT", "CodecInfo")) assertTrue("$label: raw error text \"$raw\" on screen",
+            compose.onAllNodes(hasText(raw, substring = true), useUnmergedTree = true).fetchSemanticsNodes().isEmpty())
     }
 
     private fun assertNoCrash(label: String) {
@@ -257,7 +257,6 @@ class ExportGradeE2ETest {
             is ExportState.Failed -> {
                 android.util.Log.i("ClioQA", "CLIO-QA grade-hdr $label: outcome=error \"${st.message}\"")
                 assertPtBrHdrError(st.message, label)
-                compose.onNodeWithText(HDR_ERROR, substring = true).assertIsDisplayed()
                 // The sheet can be taller than the screen when the raw cause chain is appended; click via semantics.
                 compose.onNodeWithText("Fechar").performSemanticsAction(androidx.compose.ui.semantics.SemanticsActions.OnClick)
                 compose.waitUntil(10_000) { QaHooks.export is ExportState.Closed }
