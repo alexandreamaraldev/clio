@@ -50,7 +50,13 @@ object StyledText {
     /** Words for an animated text clip frame (typewriter cuts the string). */
     fun textWords(text: String, style: TextStyle, f: AnimFrame): List<WordFrame> {
         val n = f.visibleChars.toInt().coerceAtMost(text.codePointCount(0, text.length))
-        val shown = text.substring(0, text.offsetByCodePoints(0, n))
+        // The engine cuts at grapheme boundaries; snap again with BreakIterator so a combining
+        // accent (NFD "ç") or emoji sequence is never split even if the counts ever disagree.
+        val end = text.offsetByCodePoints(0, n)
+        val bi = java.text.BreakIterator.getCharacterInstance()
+        bi.setText(text)
+        val cut = if (end >= text.length || bi.isBoundary(end)) end else bi.preceding(end).coerceAtLeast(0)
+        val shown = text.substring(0, cut)
         return shown.split(' ').filter { it.isNotEmpty() }.map { WordFrame(it, WordState.PAST, style.color, 0u, 1f, 1f, 0f) }
     }
 }

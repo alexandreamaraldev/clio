@@ -118,6 +118,8 @@ interface EditorActions {
     fun setTextStyle(id: Long, style: uniffi.clio_ffi.TextStyle) {}
     /** Timing handles for text clips (start/end in ms). */
     fun retimeText(id: Long, startMs: Long, endMs: Long) {}
+    /** Timing handles for caption cue `index` (UI clip id `-1 - index`); clamped by the engine. */
+    fun retimeCaption(index: Int, startMs: Long, endMs: Long) {}
     fun pickMusic() {}
     fun removeMusic() {}
     fun editCaptions(caps: List<Engine.Cap>) {}

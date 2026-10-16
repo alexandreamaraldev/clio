@@ -51,6 +51,24 @@ not passed to Whisper; no caption templates.
 6. **Caption position/size per project** (drag on preview) — needs a preview gesture hook.
 7. (Phase 5) stickers/emoji/shapes overlays reusing `StyledTextOverlay`/painter; templates.
 
+## Timing-handle rules (text clips and caption cues)
+
+Engine API (UniFFI, `ClioProject`):
+- `retime_text(clip_id: u64, start_ms: u64, duration_ms: u64) -> Result<(), ClioError>`
+- `retime_caption(index: u32, start_ms: u64, end_ms: u64) -> Result<Caption, ClioError>`
+  (`index` = position in `captions()`; the timeline's caption UI clip id is `-1 - index`).
+
+Rules (`text::clamp_span`), identical for both:
+1. Bounds: the span stays inside [0, video duration] (unbounded at the end when there is no video).
+2. No overlap on the same track (text clips) / among cues (captions): a dragged edge stops at the
+   neighbour's edge.
+3. Minimum length `MIN_CLIP_MS` (100 ms): dragging the start past the end stops 100 ms before it;
+   dragging the end (or both edges) keeps the start and pushes the end to at least start + 100 ms.
+4. Moving (both edges, same length) slides the span until it hits a neighbour/bound; the length is kept.
+5. If the free room is shorter than the minimum, the span fills the room.
+6. Caption word timings are rescaled proportionally into the new span.
+7. Each accepted change is one undo step; a drag that changes nothing records nothing.
+
 ## Shared files needing coordination
 
 | File | Owner | Text needs |

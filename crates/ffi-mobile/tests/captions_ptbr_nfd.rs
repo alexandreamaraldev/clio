@@ -1,7 +1,6 @@
-//! KNOWN BUG (PR #3): typewriter counts Unicode scalar values, so text in decomposed form (NFD,
-//! e.g. pasted from macOS/iOS file names or some keyboards) reveals a bare base letter before its
-//! combining accent: "Ação" in NFD shows "Ac" before "Aç". Visible units should be grapheme
-//! clusters. This test is expected to fail until that is fixed.
+//! Regression (PR #3): typewriter reveals grapheme-like clusters, so text in decomposed form (NFD,
+//! e.g. pasted from macOS/iOS file names) never shows a bare base letter before its combining
+//! accent: "Ação" in NFD goes "A", "Aç", "Açã", "Ação".
 
 use clio_ffi::*;
 

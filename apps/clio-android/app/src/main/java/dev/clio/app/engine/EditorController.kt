@@ -307,6 +307,7 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
     }
     override fun editText(id: Long, text: String) = launchEdit { renameClip(id.toULong(), text) }.let { }
     override fun setTextStyle(id: Long, style: uniffi.clio_ffi.TextStyle) = launchEdit { runCatching { setTextStyle(id.toULong(), style) } }.let { }
+    override fun retimeCaption(index: Int, startMs: Long, endMs: Long) = launchEdit { Engine.retimeCaption(this, index, startMs, endMs) }.let { }
     override fun retimeText(id: Long, startMs: Long, endMs: Long) =
         launchEdit { runCatching { retimeText(id.toULong(), startMs.coerceAtLeast(0).toULong(), (endMs - startMs).coerceAtLeast(1).toULong()) } }.let { }
 
