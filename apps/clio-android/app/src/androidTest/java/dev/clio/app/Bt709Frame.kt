@@ -27,7 +27,7 @@ class Bt709Frame private constructor(val width: Int, val height: Int, private va
         val Cr = (v[(cy / 2) * cw + cx / 2].toInt() and 255) - 128.0
         val k = 255.0 / 219.0; val c = 255.0 / 224.0
         val r = k * Y + c * 1.5748 * Cr; val g = k * Y - c * 0.1873 * Cb - c * 0.4681 * Cr; val b = k * Y + c * 1.8556 * Cb
-        return intArrayOf(r, g, b).map { Math.round(it).toInt().coerceIn(0, 255) }.toIntArray()
+        return doubleArrayOf(r, g, b).map { Math.round(it).toInt().coerceIn(0, 255) }.toIntArray()
     }
     /** Mean RGB of a (2r)² patch centred on (x, y). */
     fun patch(x: Int, yy: Int, r: Int = 24): IntArray {
