@@ -117,6 +117,26 @@ private fun EditorRoute(draftId: String, isNew: Boolean, initialTool: Int, impor
         if (uris.isNotEmpty()) vm.addMedia(uris) else vm.pickCancelled()
     }
     val music = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> if (uri != null) vm.addMusic(uri) }
+    // Mic: rationale first; after a permanent denial, offer the Settings screen (MicPermissionDialog).
+    var micDialog by remember { mutableStateOf<Boolean?>(null) } // null = hidden, true = permanent denial
+    val activity = ctx as? android.app.Activity
+    fun micRationale() = activity?.shouldShowRequestPermissionRationale(android.Manifest.permission.RECORD_AUDIO) == true
+    val mic = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
+        if (ok) vm.toggleVoiceover() else if (!micRationale()) micDialog = true
+    }
+    micDialog?.let { permanent ->
+        dev.clio.app.ui.screens.MicPermissionDialog(permanent,
+            onAllow = { micDialog = null; mic.launch(android.Manifest.permission.RECORD_AUDIO) },
+            onSettings = { micDialog = null; ctx.startActivity(android.content.Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS, android.net.Uri.fromParts("package", ctx.packageName, null))) },
+            onDismiss = { micDialog = null })
+    }
+    // Leaving the app mid-take finishes the recording and keeps it.
+    val lifecycle = @Suppress("DEPRECATION") androidx.compose.ui.platform.LocalLifecycleOwner.current.lifecycle
+    DisposableEffect(lifecycle, vm) {
+        val o = androidx.lifecycle.LifecycleEventObserver { _, e -> if (e == androidx.lifecycle.Lifecycle.Event.ON_STOP && activity?.isChangingConfigurations != true) vm.finishVoiceover() }
+        lifecycle.addObserver(o)
+        onDispose { lifecycle.removeObserver(o) }
+    }
     val back by rememberUpdatedState(onBack)
     LaunchedEffect(vm) {
         vm.events.collect { e ->
@@ -124,6 +144,7 @@ private fun EditorRoute(draftId: String, isNew: Boolean, initialTool: Int, impor
                 EditorEvent.Back -> back()
                 EditorEvent.PickMedia -> picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo))
                 EditorEvent.PickMusic -> music.launch(arrayOf("audio/*"))
+                EditorEvent.RequestMic -> if (micRationale()) micDialog = false else mic.launch(android.Manifest.permission.RECORD_AUDIO)
             }
         }
     }

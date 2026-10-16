@@ -7,3 +7,6 @@ plan/
 .claude/worktrees/
 __pycache__/
 /target
+
+# Silence WAVs written by JVM tests (Paparazzi context cacheDir)
+apps/clio-android/app/silence/

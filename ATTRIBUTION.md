@@ -50,6 +50,16 @@ iconography, images or other Adobe assets; open licences only; every asset attri
 | `assets/app-icon/hicolor/512x512/apps/ai.storyteller.filmcraft.png` | Brandon Thomas (FilmCraft owner) | Original work: FilmCraft app icon (owl with ear tufts), drawn by the owner in ArtCraft and vectorised; Linux hicolor theme 512 px | MIT OR Apache-2.0 (`assets/app-icon/LICENSE.txt`) |
 | `assets/app-icon/hicolor/scalable/apps/ai.storyteller.filmcraft.svg` | Brandon Thomas (FilmCraft owner) | Original work: FilmCraft app icon (owl with ear tufts), drawn by the owner in ArtCraft and vectorised; Linux hicolor theme scalable | MIT OR Apache-2.0 (`assets/app-icon/LICENSE.txt`) |
 | `apps/filmcraft-web/web/favicon.png` | Brandon Thomas (FilmCraft owner) | Original work: FilmCraft app icon (owl with ear tufts), drawn by the owner in ArtCraft and vectorised; 128 px | MIT OR Apache-2.0 (`assets/app-icon/LICENSE.txt`) |
+| `apps/clio-android/app/src/main/assets/sfx/confirmation_001.ogg` | Kenney (www.kenney.nl) | https://kenney.nl/assets/interface-sounds | CC0-1.0 (`apps/clio-android/app/src/main/assets/sfx/LICENSE-Kenney-CC0.txt`) |
+| `apps/clio-android/app/src/main/assets/sfx/drop_002.ogg` | Kenney (www.kenney.nl) | https://kenney.nl/assets/interface-sounds | CC0-1.0 (`apps/clio-android/app/src/main/assets/sfx/LICENSE-Kenney-CC0.txt`) |
+| `apps/clio-android/app/src/main/assets/sfx/glass_001.ogg` | Kenney (www.kenney.nl) | https://kenney.nl/assets/interface-sounds | CC0-1.0 (`apps/clio-android/app/src/main/assets/sfx/LICENSE-Kenney-CC0.txt`) |
+| `apps/clio-android/app/src/main/assets/sfx/maximize_003.ogg` | Kenney (www.kenney.nl) | https://kenney.nl/assets/interface-sounds | CC0-1.0 (`apps/clio-android/app/src/main/assets/sfx/LICENSE-Kenney-CC0.txt`) |
+| `apps/clio-android/app/src/main/assets/sfx/pluck_001.ogg` | Kenney (www.kenney.nl) | https://kenney.nl/assets/interface-sounds | CC0-1.0 (`apps/clio-android/app/src/main/assets/sfx/LICENSE-Kenney-CC0.txt`) |
+| `apps/clio-android/app/src/main/assets/sfx/scratch_002.ogg` | Kenney (www.kenney.nl) | https://kenney.nl/assets/interface-sounds | CC0-1.0 (`apps/clio-android/app/src/main/assets/sfx/LICENSE-Kenney-CC0.txt`) |
+| `apps/clio-android/app/src/main/assets/sfx/select_003.ogg` | Kenney (www.kenney.nl) | https://kenney.nl/assets/interface-sounds | CC0-1.0 (`apps/clio-android/app/src/main/assets/sfx/LICENSE-Kenney-CC0.txt`) |
+| `apps/clio-android/app/src/main/assets/sfx/switch_002.ogg` | Kenney (www.kenney.nl) | https://kenney.nl/assets/interface-sounds | CC0-1.0 (`apps/clio-android/app/src/main/assets/sfx/LICENSE-Kenney-CC0.txt`) |
+| `apps/clio-android/app/src/main/assets/sfx/toggle_001.ogg` | Kenney (www.kenney.nl) | https://kenney.nl/assets/interface-sounds | CC0-1.0 (`apps/clio-android/app/src/main/assets/sfx/LICENSE-Kenney-CC0.txt`) |
+| `apps/clio-android/app/src/main/assets/sfx/bong_001.ogg` | Kenney (www.kenney.nl) | https://kenney.nl/assets/interface-sounds | CC0-1.0 (`apps/clio-android/app/src/main/assets/sfx/LICENSE-Kenney-CC0.txt`) |
 
 ## Golden test images
 

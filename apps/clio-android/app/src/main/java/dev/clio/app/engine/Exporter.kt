@@ -122,14 +122,9 @@ class Exporter(private val context: Context) {
                 .build()
         }
         val seqs = mutableListOf(EditedMediaItemSequence(items))
-        snap.tracks.firstOrNull { it.kind == TrackKind.AUDIO }?.clips?.firstOrNull()?.let { m ->
-            val end = minOf(m.durationMs.toLong(), totalMs - m.startMs.toLong()).coerceAtLeast(1)
-            val mi = MediaItem.Builder().setUri(m.source).setClippingConfiguration(
-                MediaItem.ClippingConfiguration.Builder().setStartPositionMs(m.inMs.toLong()).setEndPositionMs(m.inMs.toLong() + Mix.spanMs(end, m.speed)).build()).build()
-            seqs += EditedMediaItemSequence(ImmutableList.of(EditedMediaItem.Builder(mi).setRemoveVideo(true)
-                .setEffects(Effects(audioChain(m, m.speed), ImmutableList.of())).build()))
-        }
-        return Composition.Builder(seqs).build()
+        seqs += AudioExport.sequences(context, snap, totalMs, chain = ::audioChain)
+        return Composition.Builder(seqs).experimentalSetForceAudioTrack(true)
+            .setEffects(Effects(listOf(LimiterProcessor()), emptyList())).build()
     }
 
     private suspend fun run(composition: Composition, out: File, onProgress: (Float) -> Unit) = coroutineScope {
@@ -188,8 +183,8 @@ class Exporter(private val context: Context) {
     /** Speed (pitch kept) then volume × fade envelope. */
     private fun audioChain(c: uniffi.clio_ffi.Clip, speed: Float): List<AudioProcessor> = buildList {
         if (speed != 1f) add(SonicAudioProcessor().apply { setSpeed(speed); setPitch(1f) })
-        if (c.muted || c.volume != 1f || c.fadeInMs > 0u || c.fadeOutMs > 0u)
-            add(GainProcessor(c.durationMs.toLong(), c.volume, c.fadeInMs.toLong(), c.fadeOutMs.toLong(), c.muted))
+        if (AudioGain.silent(c) || c.volume != 1f || c.fadeInMs > 0u || c.fadeOutMs > 0u)
+            add(GainProcessor(c.durationMs.toLong(), c.volume, c.fadeInMs.toLong(), c.fadeOutMs.toLong(), AudioGain.silent(c)))
     }
 
     /** Canvas-size bitmap: blurred, cover-cropped frame of [c] with a transparent hole where the fitted video sits. */

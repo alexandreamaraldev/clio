@@ -8,6 +8,8 @@ use std::sync::Mutex;
 
 uniffi::setup_scaffolding!();
 
+mod audio;
+pub use audio::waveform_peaks;
 mod layers;
 pub use layers::*;
 mod text;
@@ -64,6 +66,9 @@ pub struct Clip {
     pub fade_out_ms: u64,
     #[serde(default)]
     pub muted: bool,
+    /// Video clips only: id of the audio clip its sound was detached to (the video plays silent).
+    #[serde(default)]
+    pub detached_to: Option<u64>,
     /// Placement on the canvas (overlay layers; identity on the main track).
     #[serde(default)]
     pub transform: layers::LayerTransform,
@@ -83,7 +88,7 @@ pub const MIN_CLIP_MS: u64 = 100;
 
 impl Clip {
     fn new(id: u64, name: String, source: String, start_ms: u64, duration_ms: u64) -> Self {
-        Clip { id, name, source, start_ms, duration_ms, in_ms: 0, source_ms: 0, width: 0, height: 0, speed: 1.0, volume: 1.0, fade_in_ms: 0, fade_out_ms: 0, muted: false, transform: Default::default(), transition: Default::default() }
+        Clip { id, name, source, start_ms, duration_ms, in_ms: 0, source_ms: 0, width: 0, height: 0, speed: 1.0, volume: 1.0, fade_in_ms: 0, fade_out_ms: 0, muted: false, transform: Default::default(), transition: Default::default(), detached_to: None }
     }
     /// Source span consumed by this clip.
     fn span_ms(&self) -> u64 {
@@ -206,6 +211,7 @@ impl State {
             c.start_ms = at;
             at += c.duration_ms;
         }
+        self.sync_links();
         self.clamp_transitions(ti);
     }
     fn max_id(&self) -> u64 {
@@ -392,6 +398,7 @@ impl ClioProject {
         s.next_id += 1;
         let mut c = s.tracks[ti].clips[ci].clone();
         c.id = id;
+        c.detached_to = None;
         c.start_ms += c.duration_ms;
         s.copy_text_style(clip_id, id);
         s.tracks[ti].clips.insert(ci + 1, c);
@@ -531,9 +538,12 @@ impl ClioProject {
         s.checkpoint();
         let t = &mut s.tracks[ti];
         let gone = t.clips.remove(ci);
+        // Only the main (video) track is magnetic; audio and text lanes keep their clips' positions.
+        let ripple = if t.kind == TrackKind::Video { gone.duration_ms } else { 0 };
         for c in &mut t.clips[ci..] {
-            c.start_ms = c.start_ms.saturating_sub(gone.duration_ms);
+            c.start_ms = c.start_ms.saturating_sub(ripple);
         }
+        s.remove_linked(&gone);
         s.clamp_transitions(ti);
         s.prune_text_styles();
         true
@@ -595,6 +605,7 @@ impl ClioProject {
                 };
                 t.clips.insert(i + 1, right);
                 s.next_id += 1;
+                s.sync_links();
                 s.copy_text_style(clip_id, new_id);
                 s.history.undo.push(before);
                 s.history.redo.clear();

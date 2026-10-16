@@ -21,7 +21,7 @@ import uniffi.clio_ffi.TransitionKind
 class LayersTest {
     private val id = LayerTransform(0f, 0f, 1f, 0f, 1f)
     private fun clip(id: Long, start: Long, dur: Long, tr: Transition = Layers.NO_TRANSITION, t: LayerTransform = this.id) =
-        Clip(id.toULong(), "c$id", "c$id.mp4", start.toULong(), dur.toULong(), 0uL, 0uL, 0u, 0u, 1f, 1f, 0uL, 0uL, false, t, tr)
+        Clip(id.toULong(), "c$id", "c$id.mp4", start.toULong(), dur.toULong(), 0uL, 0uL, 0u, 0u, 1f, 1f, 0uL, 0uL, false, null, t, tr)
 
     private fun snap(main: List<Clip>, vararg rows: List<Clip>) = Snapshot(
         ProjectSummary("p", 1080u, 1920u, main.sumOf { it.durationMs.toLong() }.toULong(), (1 + rows.size).toUInt(), 0u),

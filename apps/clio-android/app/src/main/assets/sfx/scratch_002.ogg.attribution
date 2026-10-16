@@ -1,0 +1,8 @@
+asset:        scratch_002.ogg
+title:        Interface Sounds — scratch_002 (sound effect)
+author:       Kenney (www.kenney.nl)
+source:       https://kenney.nl/assets/interface-sounds (pack: https://kenney.nl/media/pages/assets/interface-sounds/fa43c1dd4d-1677589452/kenney_interface-sounds.zip)
+license:      CC0-1.0
+license-file: apps/clio-android/app/src/main/assets/sfx/LICENSE-Kenney-CC0.txt
+added:        2026-10-16 by Grok Bot (agent, Clio audio)
+notes:        Unmodified file from Kenney "Interface Sounds" 1.0. CC0 verified on the source page and in the pack's License.txt. Bundled in the Clio Android app's sound effects library (SfxLibrary.kt).
