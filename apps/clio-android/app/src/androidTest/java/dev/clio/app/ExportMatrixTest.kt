@@ -66,7 +66,11 @@ class ExportMatrixTest {
                 val m = MediaMetadataRetriever(); m.setDataSource(ctx, uri)
                 val d = m.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)!!.toLong()
                 val a = m.extractMetadata(MediaMetadataRetriever.METADATA_KEY_HAS_AUDIO)
-                val size = m.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH) + "x" + m.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT); m.release()
+                // Transformer may encode portrait as landscape + a 90° rotation flag; compare displayed size.
+                val vw = m.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)!!.toInt()
+                val vh = m.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)!!.toInt()
+                val rot = m.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)?.toIntOrNull() ?: 0
+                val size = if (rot % 180 != 0) "${vh}x$vw" else "${vw}x$vh"; m.release()
                 check(size == "720x1280") { "size $size" }
                 check(abs(d - snap.summary.durationMs.toLong()) <= 350) { "duration $d vs ${snap.summary.durationMs}" }
                 check(a == "yes") { "no audio" }
