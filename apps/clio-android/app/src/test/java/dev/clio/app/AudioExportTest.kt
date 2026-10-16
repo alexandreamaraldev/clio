@@ -35,8 +35,11 @@ class AudioExportTest {
     /** One planned item: silence of n frames, or a clip span [fromMs, toMs) in its source. */
     private sealed interface Item { data class Gap(val frames: Long) : Item; data class Span(val uri: String, val fromMs: Long, val toMs: Long) : Item }
 
+    private val silenceDir = java.nio.file.Files.createTempDirectory("clio").resolve("silence").toFile()
+    @org.junit.After fun cleanSilence() { silenceDir.parentFile?.deleteRecursively() }
+
     private fun plan(s: Snapshot, totalMs: Long): List<List<Item>> =
-        AudioExport.sequences(paparazzi.context, s, totalMs) { _, _ -> emptyList() }.map { seq ->
+        AudioExport.sequences(paparazzi.context, s, totalMs, silenceDir) { _, _ -> emptyList() }.map { seq ->
             seq.editedMediaItems.map { e ->
                 val uri = e.mediaItem.localConfiguration!!.uri
                 if (uri.path!!.contains("/silence/")) {

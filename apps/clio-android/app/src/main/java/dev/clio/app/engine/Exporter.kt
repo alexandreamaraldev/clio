@@ -110,7 +110,7 @@ class Exporter(private val context: Context) {
                 .build()
         }
         val seqs = mutableListOf(EditedMediaItemSequence(items))
-        seqs += AudioExport.sequences(context, snap, totalMs, ::audioChain)
+        seqs += AudioExport.sequences(context, snap, totalMs, chain = ::audioChain)
         return Composition.Builder(seqs).experimentalSetForceAudioTrack(true)
             .setEffects(Effects(listOf(LimiterProcessor()), emptyList())).build()
     }

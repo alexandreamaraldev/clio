@@ -25,7 +25,7 @@ import java.io.File
  */
 @androidx.annotation.OptIn(UnstableApi::class)
 object AudioExport {
-    fun sequences(context: Context, snap: Snapshot, totalMs: Long, chain: (Clip, Float) -> List<AudioProcessor>): List<EditedMediaItemSequence> =
+    fun sequences(context: Context, snap: Snapshot, totalMs: Long, silenceDir: File = File(context.cacheDir, "silence"), chain: (Clip, Float) -> List<AudioProcessor>): List<EditedMediaItemSequence> =
         snap.tracks.filter { it.kind == TrackKind.AUDIO }.mapNotNull { t ->
             val items = mutableListOf<EditedMediaItem>()
             var cursor = 0L
@@ -35,7 +35,7 @@ object AudioExport {
                 val skip = start - c.startMs.toLong()
                 val len = minOf(c.durationMs.toLong() - skip, totalMs - start)
                 if (len <= 0) continue
-                if (start > cursor) items += silence(context, start - cursor)
+                if (start > cursor) items += silence(silenceDir, start - cursor)
                 val from = c.inMs.toLong() + Mix.spanMs(skip, c.speed)
                 val mi = MediaItem.Builder().setUri(c.source).setClippingConfiguration(MediaItem.ClippingConfiguration.Builder()
                     .setStartPositionMs(from).setEndPositionMs(from + Mix.spanMs(len, c.speed)).build()).build()
@@ -45,8 +45,8 @@ object AudioExport {
             if (items.isEmpty()) null else EditedMediaItemSequence(items)
         }
 
-    private fun silence(context: Context, ms: Long): EditedMediaItem {
-        val f = silenceWav(File(context.cacheDir, "silence").apply { mkdirs() }, ms)
+    private fun silence(dir: File, ms: Long): EditedMediaItem {
+        val f = silenceWav(dir.apply { mkdirs() }, ms)
         return EditedMediaItem.Builder(MediaItem.fromUri(android.net.Uri.fromFile(f))).build()
     }
 
@@ -76,11 +76,12 @@ object AudioExport {
     private const val RATE = 44_100L
 }
 
-/** Soft limiter on the final export mix (all lanes summed), so overlapping clips never hard-clip. */
+/** Soft limiter on the final export mix (all lanes summed), so overlapping clips never hard-clip.
+ *  Only 16-bit PCM is processed; any other encoding passes through untouched (processor inactive). */
 @androidx.annotation.OptIn(UnstableApi::class)
 class LimiterProcessor : BaseAudioProcessor() {
     override fun onConfigure(f: AudioProcessor.AudioFormat): AudioProcessor.AudioFormat {
-        if (f.encoding != C.ENCODING_PCM_16BIT) throw AudioProcessor.UnhandledAudioFormatException(f)
+        if (f.encoding != C.ENCODING_PCM_16BIT) return AudioProcessor.AudioFormat.NOT_SET
         return f
     }
     override fun queueInput(input: ByteBuffer) {
