@@ -37,7 +37,7 @@ fn scale_position_opacity_are_clamped() {
     let (p, ..) = project();
     let o = p.add_overlay("pip".into(), "p.png".into(), 0, 1000).unwrap();
     let t = set(&p, o, -9.0, 9.0, 0.0, 0.0, -1.0);
-    assert_eq!((t.x, t.y, t.scale, t.opacity), (-2.0, 2.0, MIN_LAYER_SCALE, 0.0));
+    assert_eq!((t.x, t.y, t.scale, t.opacity), (-MAX_LAYER_OFFSET, MAX_LAYER_OFFSET, MIN_LAYER_SCALE, 0.0));
     let t = set(&p, o, 0.3, -0.3, -2.0, 0.0, 2.0);
     assert_eq!((t.scale, t.opacity), (MIN_LAYER_SCALE, 1.0));
     let t = set(&p, o, f32::INFINITY, f32::NEG_INFINITY, f32::NAN, f32::INFINITY, 0.5);
@@ -70,6 +70,18 @@ fn layer_look_without_transitions_is_its_transform() {
         assert_eq!(l.transform, t);
         assert_eq!(l.brightness, 1.0);
     }
+}
+
+#[test]
+fn limits_are_exactly_reachable() {
+    // The UI sliders and the exporter use these same bounds (LayerLimits.kt mirrors them).
+    assert_eq!((MAX_LAYER_OFFSET, MAX_LAYER_SCALE), (2.0, 4.0));
+    let (p, ..) = project();
+    let o = p.add_overlay("pip".into(), "p.png".into(), 0, 1000).unwrap();
+    let t = set(&p, o, MAX_LAYER_OFFSET, -MAX_LAYER_OFFSET, MAX_LAYER_SCALE, 180.0, 1.0);
+    assert_eq!((t.x, t.y, t.scale, t.rotation), (2.0, -2.0, 4.0, 180.0));
+    let t = set(&p, o, 2.0001, -2.0001, 4.0001, -180.0, 1.0);
+    assert_eq!((t.x, t.y, t.scale, t.rotation), (2.0, -2.0, 4.0, -180.0));
 }
 
 // ---- transition timing ----
