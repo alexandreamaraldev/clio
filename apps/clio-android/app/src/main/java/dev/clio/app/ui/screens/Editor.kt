@@ -73,7 +73,7 @@ const val TOOL_DUPLICATE = 7
 private val panelTools = setOf(TOOL_TEXT, TOOL_MUSIC, TOOL_CAPTIONS, TOOL_SPEED, TOOL_VOLUME, TOOL_FORMAT)
 
 @Immutable
-data class TextItem(val id: Long, val text: String, val startMs: Long, val endMs: Long)
+data class TextItem(val id: Long, val text: String, val startMs: Long, val endMs: Long, val style: uniffi.clio_ffi.TextStyle = dev.clio.app.engine.StyledText.fallbackStyle)
 
 enum class SaveState { Draft, Saving, Saved }
 
@@ -115,6 +115,9 @@ interface EditorActions {
     fun setCaptionStyle(style: CaptionStyle) {}
     fun addText() {}
     fun editText(id: Long, text: String) {}
+    fun setTextStyle(id: Long, style: uniffi.clio_ffi.TextStyle) {}
+    /** Timing handles for text clips (start/end in ms). */
+    fun retimeText(id: Long, startMs: Long, endMs: Long) {}
     fun pickMusic() {}
     fun removeMusic() {}
     fun editCaptions(caps: List<Engine.Cap>) {}
@@ -170,7 +173,7 @@ fun EditorScreen(
             ) {
                 if (ui.blurBg && !ui.fill) BlurBackdrop(ui.tracks.firstOrNull { it.kind == "video" }?.clips.orEmpty(), playhead)
                 preview(ui.fill)
-                TextLayer(ui.texts, playhead, Modifier.align(Alignment.Center).padding(Space.md))
+                StyledTextLayer(ui.texts, playhead, Modifier.matchParentSize())
                 if (ui.hasMedia) Text(when { ui.fill -> "Preencher"; ui.blurBg -> "Desfoque"; else -> "Ajustar" }, style = MaterialTheme.typography.labelSmall, color = ClioColors.OnMedia,
                     modifier = Modifier.align(Alignment.TopEnd).padding(10.dp).pressable(onClick = actions::toggleFill)
                         .clip(ClioShapes.pill).background(ClioColors.MediaScrim).padding(horizontal = 10.dp, vertical = 5.dp))
@@ -181,7 +184,7 @@ fun EditorScreen(
                     Spacer(Modifier.height(Space.sm))
                     Text(stringResource(R.string.action_add_video), style = MaterialTheme.typography.labelLarge, color = ClioColors.OnMedia)
                 }
-                CaptionLayer(ui.captions, capStyle, playhead, Modifier.align(Alignment.BottomCenter).padding(bottom = Space.xl, start = Space.md, end = Space.md))
+                StyledCaptionLayer(ui.captions, capStyle, playhead, Modifier.matchParentSize())
             }
         }
 
@@ -214,7 +217,7 @@ fun EditorScreen(
         }, label = "panel") { panel ->
             when (panel) {
                 TOOL_CAPTIONS -> CaptionsPanel(ui.captions, capStyle, ui.captionStatus, actions::setCaptionStyle, actions::generateCaptions, actions::editCaptions)
-                TOOL_TEXT -> TextPanel(ui.texts, actions::addText, actions::editText)
+                TOOL_TEXT -> TextPanel(ui.texts, actions::addText, actions::editText, actions::setTextStyle, actions::retimeText)
                 TOOL_MUSIC -> MusicPanel(ui.music, actions::pickMusic, actions::removeMusic)
                 TOOL_SPEED -> SpeedPanel(target) { actions.setSpeed(target?.id, it) }
                 TOOL_VOLUME -> VolumePanel(target) { v, fi, fo, m -> actions.setAudio(target?.id, v, fi, fo, m) }
@@ -266,22 +269,6 @@ private fun TimeLabel(playhead: () -> Float, total: Float) {
     val tenth by remember { derivedStateOf { (playhead() * 10).toInt() } }
     Text(fmt(tenth / 10f), style = MaterialTheme.typography.labelMedium, color = ClioColors.TextPrimary)
     Text("  /  ${fmt(total)}", style = MaterialTheme.typography.labelMedium, color = ClioColors.TextTertiary)
-}
-
-@Composable
-private fun TextLayer(texts: List<TextItem>, playhead: () -> Float, modifier: Modifier) {
-    val current by remember(texts) { derivedStateOf { val ms = (playhead() * 1000).toLong(); texts.firstOrNull { ms >= it.startMs && ms < it.endMs }?.text } }
-    AnimatedContent(current, modifier,
-        transitionSpec = { (fadeIn(ClioMotion.fade(180)) + scaleIn(ClioMotion.snappy(), 0.9f)) togetherWith fadeOut(ClioMotion.fade(120)) },
-        label = "txt") { t -> if (t != null) CaptionOverlay(t, CaptionStyle.Bold) }
-}
-
-@Composable
-private fun CaptionLayer(caps: List<Engine.Cap>, style: CaptionStyle, playhead: () -> Float, modifier: Modifier) {
-    val current by remember(caps) { derivedStateOf { val ms = (playhead() * 1000).toLong(); caps.firstOrNull { ms in it.startMs..it.endMs }?.text } }
-    AnimatedContent(current, modifier,
-        transitionSpec = { (fadeIn(ClioMotion.fade(180)) + scaleIn(ClioMotion.snappy(), 0.96f)) togetherWith fadeOut(ClioMotion.fade(120)) },
-        label = "cap") { t -> if (t != null) CaptionOverlay(t, style) }
 }
 
 /**

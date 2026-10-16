@@ -2,18 +2,10 @@ package dev.clio.app.engine
 
 import android.content.ContentValues
 import android.content.Context
-import android.graphics.Color
-import android.graphics.Typeface
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
-import android.text.SpannableString
-import android.text.Spanned
-import android.text.style.AbsoluteSizeSpan
-import android.text.style.BackgroundColorSpan
-import android.text.style.ForegroundColorSpan
-import android.text.style.StyleSpan
 import androidx.annotation.OptIn
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
@@ -30,7 +22,6 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import androidx.media3.effect.OverlaySettings
 import androidx.media3.effect.Presentation
-import androidx.media3.effect.TextOverlay
 import androidx.media3.transformer.Composition
 import androidx.media3.transformer.EditedMediaItem
 import androidx.media3.transformer.EditedMediaItemSequence
@@ -72,9 +63,10 @@ class Exporter(private val context: Context) {
     private fun buildComposition(snap: Snapshot, spec: ExportSpec, style: CaptionStyle): Composition {
         val video = snap.tracks.firstOrNull { it.kind == TrackKind.VIDEO }?.clips.orEmpty()
         require(video.isNotEmpty()) { "Adicione um vídeo antes de exportar" }
-        val texts = snap.tracks.filter { it.kind == TrackKind.TEXT }.flatMap { it.clips }
-            .map { Timed(it.startMs.toLong(), (it.startMs + it.durationMs).toLong(), it.name) }
-        val caps = snap.captions.map { Timed(it.startMs.toLong(), it.endMs.toLong(), it.text) }
+        val texts = snap.tracks.filter { it.kind == TrackKind.TEXT }.flatMap { it.clips }.map { c ->
+            StyledTextItem(c.name, c.startMs.toLong(), (c.startMs + c.durationMs).toLong(), snap.textStyles.firstOrNull { it.clipId == c.id }?.style ?: StyledText.defaultStyle)
+        }
+        val caps = snap.captions
         val totalMs = snap.summary.durationMs.toLong()
         val blur = snap.blurBg && !snap.fill
 
@@ -87,8 +79,8 @@ class Exporter(private val context: Context) {
                 else setImageDurationMs(c.durationMs.toLong())
             }.build()
             val overlays = ImmutableList.of<androidx.media3.effect.TextureOverlay>(
-                TimedTextOverlay(c.startMs.toLong(), texts, spec.height, centered = true, style = CaptionStyle.Bold),
-                TimedTextOverlay(c.startMs.toLong(), caps, spec.height, centered = false, style = style),
+                StyledTextOverlay(context, c.startMs.toLong(), spec.width, spec.height, 0f) { TextScene.text(texts, it) },
+                StyledTextOverlay(context, c.startMs.toLong(), spec.width, spec.height, -0.72f) { TextScene.caption(caps, style.preset, it) },
             )
             val video = mutableListOf<androidx.media3.common.Effect>()
             if (speed != 1f) video += SpeedChangeEffect(speed)
@@ -174,37 +166,6 @@ class Exporter(private val context: Context) {
         if (speed != 1f) add(SonicAudioProcessor().apply { setSpeed(speed); setPitch(1f) })
         if (c.muted || c.volume != 1f || c.fadeInMs > 0u || c.fadeOutMs > 0u)
             add(GainProcessor(c.durationMs.toLong(), c.volume, c.fadeInMs.toLong(), c.fadeOutMs.toLong(), c.muted))
-    }
-
-    private data class Timed(val startMs: Long, val endMs: Long, val text: String)
-
-    /** Shows whichever cue is active at the current frame; times are relative to the clip's place on the timeline. */
-    private class TimedTextOverlay(
-        private val clipStartMs: Long,
-        private val cues: List<Timed>,
-        private val frameHeight: Int,
-        private val centered: Boolean,
-        private val style: CaptionStyle,
-    ) : TextOverlay() {
-        private var basePts = Long.MIN_VALUE
-        private val empty = SpannableString(" ")
-
-        override fun getText(presentationTimeUs: Long): SpannableString {
-            if (basePts == Long.MIN_VALUE) basePts = presentationTimeUs
-            val t = clipStartMs + (presentationTimeUs - basePts) / 1000
-            val cue = cues.firstOrNull { t in it.startMs until it.endMs } ?: return empty
-            val text = if (style == CaptionStyle.Bold) cue.text.uppercase() else cue.text
-            return SpannableString(text).apply {
-                val all = Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
-                setSpan(AbsoluteSizeSpan((frameHeight * if (centered) 0.045f else 0.032f).toInt()), 0, length, all)
-                setSpan(StyleSpan(if (style == CaptionStyle.Clean) Typeface.NORMAL else Typeface.BOLD), 0, length, all)
-                setSpan(ForegroundColorSpan(if (style == CaptionStyle.Karaoke) 0xFFFFD27A.toInt() else Color.WHITE), 0, length, all)
-                if (style == CaptionStyle.Box) setSpan(BackgroundColorSpan(0x99000000.toInt()), 0, length, all)
-            }
-        }
-
-        override fun getOverlaySettings(presentationTimeUs: Long): OverlaySettings =
-            OverlaySettings.Builder().setBackgroundFrameAnchor(0f, if (centered) 0f else -0.72f).build()
     }
 }
 

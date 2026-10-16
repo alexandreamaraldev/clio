@@ -29,6 +29,11 @@ class ScreensTest {
     @Test fun editorCaptions() = shot(ThemeMode.Dark) { EditorScreen(ui(caps), { 3.0f }, initialTool = TOOL_CAPTIONS) }
     @Test fun editorCaptionsDownloading() = shot(ThemeMode.Dark) { EditorScreen(ui(st = CaptionStatus.Downloading(0.38f, 290)), { 2.4f }, initialTool = TOOL_CAPTIONS) }
     @Test fun editorText() = shot(ThemeMode.Dark) { EditorScreen(ui().copy(texts = listOf(TextItem(1, "Lisboa", 2000, 5000), TextItem(2, "Fim", 9000, 11000))), { 2.4f }, initialTool = TOOL_TEXT) }
+    @Test fun editorStyledText() = shot(ThemeMode.Dark) {
+        val st = dev.clio.app.engine.StyledText.fallbackStyle.copy(font = uniffi.clio_ffi.TextFont.PACIFICO, size = 0.07f, color = 0xFFF2683Cu,
+            strokeColor = 0xFFFFFFFFu, strokeWidth = 0.12f)
+        EditorScreen(ui(caps).copy(texts = listOf(TextItem(1, "Olá, São Paulo!", 2000, 5000, st))), { 3.0f }, initialTool = TOOL_TEXT)
+    }
     @Test fun editorSpeed() = shot(ThemeMode.Dark) { EditorScreen(ui(), { 2.4f }, initialTool = TOOL_SPEED) }
     @Test fun editorVolume() = shot(ThemeMode.Light) { EditorScreen(ui(), { 2.4f }, initialTool = TOOL_VOLUME) }
     @Test fun editorFormat() = shot(ThemeMode.Dark) { EditorScreen(ui().copy(canvasW = 1080, canvasH = 1080, blurBg = true), { 2.4f }, initialTool = TOOL_FORMAT) }

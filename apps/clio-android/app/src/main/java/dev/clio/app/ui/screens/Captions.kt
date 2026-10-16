@@ -39,18 +39,12 @@ sealed interface CaptionStatus {
     data class Failed(val message: String) : CaptionStatus
 }
 
-enum class CaptionStyle(val label: String) { Clean("Clean"), Bold("Bold"), Box("Caixa"), Karaoke("Karaokê") }
-
-/** How a caption looks on the preview, per style. */
-@Composable
-fun CaptionOverlay(text: String, style: CaptionStyle, modifier: Modifier = Modifier) {
-    val base = MaterialTheme.typography.titleLarge
-    when (style) {
-        CaptionStyle.Clean -> Text(text, modifier, style = base, color = ClioColors.OnMedia)
-        CaptionStyle.Bold -> Text(text.uppercase(), modifier, style = base.copy(fontWeight = FontWeight.Black, fontSize = 20.sp), color = ClioColors.OnMedia)
-        CaptionStyle.Box -> Text(text, modifier.clip(ClioShapes.sm).background(ClioColors.MediaScrim).padding(horizontal = 10.dp, vertical = 4.dp), style = base, color = ClioColors.OnMedia)
-        CaptionStyle.Karaoke -> Text(text, modifier, style = base.copy(fontWeight = FontWeight.Bold), color = ClioColors.CaptionHighlight)
-    }
+/** Caption looks; word-by-word ones animate from the Whisper word timings (see engine `caption_frame`). */
+enum class CaptionStyle(val label: String, val preset: uniffi.clio_ffi.CaptionPreset) {
+    Clean("Clean", uniffi.clio_ffi.CaptionPreset.CLEAN), Bold("Bold", uniffi.clio_ffi.CaptionPreset.BOLD),
+    Box("Caixa", uniffi.clio_ffi.CaptionPreset.BOX), Karaoke("Karaokê", uniffi.clio_ffi.CaptionPreset.KARAOKE),
+    Pop("Pop", uniffi.clio_ffi.CaptionPreset.POP), Bounce("Pulo", uniffi.clio_ffi.CaptionPreset.BOUNCE),
+    Highlight("Destaque", uniffi.clio_ffi.CaptionPreset.HIGHLIGHT),
 }
 
 @Composable

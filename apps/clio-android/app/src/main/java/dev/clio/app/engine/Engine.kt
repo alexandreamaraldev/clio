@@ -15,7 +15,9 @@ object Engine {
     fun newProject(name: String, width: UInt = 1080u, height: UInt = 1920u): uniffi.clio_ffi.ClioProject? =
         runCatching { uniffi.clio_ffi.ClioProject(name, width, height) }.getOrNull()
 
-    data class Cap(val startMs: Long, val endMs: Long, val text: String)
+    data class Cap(val startMs: Long, val endMs: Long, val text: String, val words: List<uniffi.clio_ffi.CaptionWord> = emptyList()) {
+        fun toFfi() = uniffi.clio_ffi.Caption(startMs.toULong(), endMs.toULong(), text, words)
+    }
 
     /** STUB on the Rust side for now (placeholder cues); see crates/ffi-mobile generate_captions. */
     fun generateCaptions(durationMs: Long): List<Cap> =
@@ -24,6 +26,6 @@ object Engine {
 
     /** REAL: SRT/WebVTT writer from the FilmCraft captions crate. */
     fun captionsToSrt(caps: List<Cap>): String =
-        runCatching { uniffi.clio_ffi.captionsToFile(caps.map { uniffi.clio_ffi.Caption(it.startMs.toULong(), it.endMs.toULong(), it.text) }, false) }
+        runCatching { uniffi.clio_ffi.captionsToFile(caps.map { it.toFfi() }, false) }
             .getOrElse { "" }
 }
