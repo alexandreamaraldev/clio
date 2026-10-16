@@ -119,14 +119,19 @@ class ExportGradeE2ETest {
         cases.forEach { (name, g) -> val id = p.appendClip(v, name, still, 1000u); p.setClipSourceInfo(id, 0u, 720u, 1280u); p.setClipGrade(id, g) }
         val uri = runBlocking { withTimeout(240_000) { Exporter(ctx).export(p.snapshot(), ExportSpec("grade-ref", 720, 1280, 30), CaptionStyle.Clean) {} } }
 
-        val lib = Grades.Library(ctx); val tol = 14
+        val lib = Grades.Library(ctx); val tol = 12
         val m = MediaMetadataRetriever(); m.setDataSource(ctx, uri)
         val fails = mutableListOf<String>()
+        val n0 = m.getFrameAtTime(500_000, MediaMetadataRetriever.OPTION_CLOSEST)!!.copy(Bitmap.Config.ARGB_8888, false)
+        val offset = swatches.indices.map { i -> val p0 = patch(n0, i); val r = swatches[i]; intArrayOf(p0[0] - ((r shr 16) and 255), p0[1] - ((r shr 8) and 255), p0[2] - (r and 255)) }
+        android.util.Log.i("ClioQA", "CLIO-QA grade-ref pipeline offset (neutral): " + offset.joinToString(" ") { it.joinToString(",") })
         try {
             cases.forEachIndexed { k, (name, g) ->
                 val f = m.getFrameAtTime((k * 1000L + 500) * 1000, MediaMetadataRetriever.OPTION_CLOSEST)!!.copy(Bitmap.Config.ARGB_8888, false)
                 swatches.forEachIndexed { i, rgb ->
-                    val got = patch(f, i); val want = reference(rgb, g, lib)
+                    // The still->H.264->decode path alone shifts colours (measured on the neutral clip);
+                    // compare the grade's effect on top of that offset.
+                    val got = patch(f, i); val want = reference(rgb, g, lib).let { r -> IntArray(3) { r[it] + offset[i][it] } }
                     val err = (0..2).maxOf { kotlin.math.abs(got[it] - want[it]) }
                     val line = "CLIO-QA grade-ref $name swatch$i: got ${got.joinToString(",")} want ${want.joinToString(",")} err $err"
                     android.util.Log.i("ClioQA", line)
