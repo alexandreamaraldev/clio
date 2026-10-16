@@ -1,5 +1,6 @@
 package dev.clio.app.ui.screens
 
+import androidx.compose.ui.platform.testTag
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
@@ -96,7 +97,8 @@ fun ExportSheet(
                         is ExportState.Failed -> st.message
                         is ExportState.Running -> "${(shown * 100).toInt()}% · ${st.label}"
                         else -> ""
-                    }, style = MaterialTheme.typography.bodyMedium, color = ClioColors.TextTertiary)
+                    }, style = MaterialTheme.typography.bodyMedium, color = ClioColors.TextTertiary,
+                        modifier = if (failed) Modifier.testTag("export_error") else Modifier)
                     Spacer(Modifier.height(Space.lg))
                     if (!failed) Box(Modifier.fillMaxWidth().height(4.dp).clip(ClioShapes.pill).background(ClioColors.SurfaceHigh)) {
                         Box(Modifier.fillMaxWidth(shown).fillMaxHeight().clip(ClioShapes.pill).background(if (done) ClioColors.Clay else ClioColors.Primary))
