@@ -8,6 +8,8 @@ use std::sync::Mutex;
 
 uniffi::setup_scaffolding!();
 
+mod layers;
+pub use layers::*;
 mod text;
 pub use text::*;
 
@@ -26,6 +28,8 @@ pub enum TrackKind {
     Audio,
     Text,
     Effect,
+    /// Free-positioned video/image layers drawn over the main track (PIP).
+    Overlay,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -60,6 +64,12 @@ pub struct Clip {
     pub fade_out_ms: u64,
     #[serde(default)]
     pub muted: bool,
+    /// Placement on the canvas (overlay layers; identity on the main track).
+    #[serde(default)]
+    pub transform: layers::LayerTransform,
+    /// Transition from this clip into the next one on the main track.
+    #[serde(default)]
+    pub transition: layers::Transition,
 }
 
 fn one() -> f32 {
@@ -73,7 +83,7 @@ pub const MIN_CLIP_MS: u64 = 100;
 
 impl Clip {
     fn new(id: u64, name: String, source: String, start_ms: u64, duration_ms: u64) -> Self {
-        Clip { id, name, source, start_ms, duration_ms, in_ms: 0, source_ms: 0, width: 0, height: 0, speed: 1.0, volume: 1.0, fade_in_ms: 0, fade_out_ms: 0, muted: false }
+        Clip { id, name, source, start_ms, duration_ms, in_ms: 0, source_ms: 0, width: 0, height: 0, speed: 1.0, volume: 1.0, fade_in_ms: 0, fade_out_ms: 0, muted: false, transform: Default::default(), transition: Default::default() }
     }
     /// Source span consumed by this clip.
     fn span_ms(&self) -> u64 {
@@ -196,6 +206,7 @@ impl State {
             c.start_ms = at;
             at += c.duration_ms;
         }
+        self.clamp_transitions(ti);
     }
     fn max_id(&self) -> u64 {
         self.tracks.iter().flat_map(|t| std::iter::once(t.id).chain(t.clips.iter().map(|c| c.id))).max().unwrap_or(0)
@@ -523,6 +534,7 @@ impl ClioProject {
         for c in &mut t.clips[ci..] {
             c.start_ms = c.start_ms.saturating_sub(gone.duration_ms);
         }
+        s.clamp_transitions(ti);
         s.prune_text_styles();
         true
     }
@@ -572,6 +584,7 @@ impl ClioProject {
                 let left_ms = at_ms - c.start_ms;
                 t.clips[i].duration_ms = left_ms;
                 t.clips[i].fade_out_ms = 0;
+                t.clips[i].transition = Default::default();
                 let right = Clip {
                     id: new_id,
                     start_ms: at_ms,

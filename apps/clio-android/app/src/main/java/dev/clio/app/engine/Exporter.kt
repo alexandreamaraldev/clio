@@ -12,7 +12,6 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.effect.OverlayEffect
-import androidx.media3.effect.FrameDropEffect
 import androidx.media3.effect.BitmapOverlay
 import androidx.media3.effect.SpeedChangeEffect
 import androidx.media3.common.C
@@ -53,6 +52,10 @@ class Exporter(private val context: Context) {
     /** Diagnostics toggle used by the device QA export matrix. */
     internal var frameDrop = true
 
+    /** Layer decode counters from the last export (bench/QA diagnostics). */
+    data class LayerStats(val decodedFrames: Int, val requestedFrames: Int)
+    @Volatile internal var lastLayerStats = LayerStats(0, 0); private set
+
     companion object {
         const val MAX_MUXER_GAP_MS = 60_000L
     }
@@ -60,12 +63,18 @@ class Exporter(private val context: Context) {
 
     suspend fun export(snap: Snapshot, spec: ExportSpec, captionStyle: CaptionStyle, onProgress: (Float) -> Unit): Uri {
         val out = File(context.cacheDir, "export-${System.currentTimeMillis()}.mp4")
-        val composition = buildComposition(snap, spec, captionStyle)
-        withContext(Dispatchers.Main) { run(composition, out, onProgress) }
+        // Layer frame sources live for exactly one export (Exporter instances may be shared).
+        val sources = mutableListOf<Layers.FrameSource>()
+        try {
+            val composition = buildComposition(snap, spec, captionStyle, sources)
+            withContext(Dispatchers.Main) { run(composition, out, onProgress) }
+            lastLayerStats = LayerStats(sources.sumOf { it.decodes }, sources.sumOf { it.requests })
+            sources.firstNotNullOfOrNull { it.error }?.let { throw IllegalStateException(it) }
+        } finally { sources.forEach { it.close() } }
         return withContext(Dispatchers.IO) { publish(out, snap.summary.name) }
     }
 
-    private fun buildComposition(snap: Snapshot, spec: ExportSpec, style: CaptionStyle): Composition {
+    private fun buildComposition(snap: Snapshot, spec: ExportSpec, style: CaptionStyle, opened: MutableList<Layers.FrameSource>): Composition {
         val video = snap.tracks.firstOrNull { it.kind == TrackKind.VIDEO }?.clips.orEmpty()
         require(video.isNotEmpty()) { "Adicione um vídeo antes de exportar" }
         val texts = snap.tracks.filter { it.kind == TrackKind.TEXT }.flatMap { it.clips }.map { c ->
@@ -75,7 +84,11 @@ class Exporter(private val context: Context) {
         val totalMs = snap.summary.durationMs.toLong()
         val blur = snap.blurBg && !snap.fill
 
-        val items = video.map { c ->
+        // One frame source per layer, shared by every main item it overlaps (closed after export).
+        val layers = Layers.overlayClips(snap)
+        val sources = Layers.FrameSource.plan(context, layers, spec.width) { MediaKind.isImage(context, it.source) }
+        opened += sources.values
+        val items = video.mapIndexed { index, c ->
             val isImage = MediaKind.isImage(context, c.source)
             val speed = if (isImage) 1f else c.speed
             val mi = MediaItem.Builder().setUri(c.source).apply {
@@ -83,16 +96,23 @@ class Exporter(private val context: Context) {
                     .setStartPositionMs(c.inMs.toLong()).setEndPositionMs(c.inMs.toLong() + Mix.spanMs(c.durationMs.toLong(), speed)).build())
                 else setImageDurationMs(c.durationMs.toLong())
             }.build()
+            // Overlay/PIP layers that overlap this item (bottom row first); drawn after the blur backdrop, before text.
+            val layerOverlays = layers.filter { it.startMs < c.startMs + c.durationMs && it.startMs + it.durationMs > c.startMs }
+                .map { Layers.LayerOverlay(sources.getValue(it.id), it, c.startMs.toLong(), spec.width, spec.height) }
+            val incoming = Layers.incoming(video, index)
             val video = mutableListOf<androidx.media3.common.Effect>()
             if (speed != 1f) video += SpeedChangeEffect(speed)
-            if (!isImage && frameDrop) video += FrameDropEffect.createDefaultFrameDropEffect(spec.fps.toFloat())
+            if (!isImage && frameDrop && FpsCap.needed(FpsCap.sourceFps(context, Uri.parse(c.source), c.inMs.toLong() * 1000), spec.fps.toFloat(), speed)) video += FpsCap(spec.fps.toFloat())
             video += Presentation.createForWidthAndHeight(spec.width, spec.height,
                 if (snap.fill) Presentation.LAYOUT_SCALE_TO_FIT_WITH_CROP else Presentation.LAYOUT_SCALE_TO_FIT)
-            val overlays = mutableListOf<androidx.media3.effect.TextureOverlay>()
             // Blurred background: a pre-blurred still of the clip fills the letterbox bars (the centre is
             // transparent, so the fitted video shows through). Same look as the preview, and cheap on any GPU.
             // (Media3 1.4's GaussianBlurWithFrameOverlaid produced wrong output sizes / stalled on device QA.)
-            if (blur) blurredBackdrop(c, spec.width, spec.height)?.let { overlays += BitmapOverlay.createStaticBitmapOverlay(it) }
+            // It is part of the clip: applied before the transition effects so Slide/Zoom move clip + backdrop together.
+            if (blur) blurredBackdrop(c, spec.width, spec.height)?.let { video += OverlayEffect(ImmutableList.of(BitmapOverlay.createStaticBitmapOverlay(it))) }
+            video += Layers.exportEffects(c, incoming)
+            val overlays = mutableListOf<androidx.media3.effect.TextureOverlay>()
+            overlays += layerOverlays
             overlays += StyledTextOverlay(context, c.startMs.toLong(), spec.width, spec.height, 0f) { TextScene.text(texts, it) }
             overlays += StyledTextOverlay(context, c.startMs.toLong(), spec.width, spec.height, -0.72f) { TextScene.caption(caps, style.preset, it) }
             video += OverlayEffect(ImmutableList.copyOf(overlays))

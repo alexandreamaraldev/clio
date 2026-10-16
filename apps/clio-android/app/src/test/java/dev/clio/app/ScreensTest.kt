@@ -41,6 +41,17 @@ class ScreensTest {
     @Test fun exportChoose() = shot(ThemeMode.Dark) { ExportSheet(dev.clio.app.engine.ExportState.Choosing, {}, {}, {}) }
     @Test fun exportDone() = shot(ThemeMode.Light) { ExportSheet(dev.clio.app.engine.ExportState.Done(android.net.Uri.EMPTY), {}, {}, {}) }
     @Test fun exportProgress() = shot(ThemeMode.Dark) { ExportSheet(dev.clio.app.engine.ExportState.Running(0.62f, "Stories / Reels / TikTok"), {}, {}, {}) }
+    private val pip = UiLayer(5, "Selfie", "s.mp4", 1000, 4000, 0, 1f, false, 0, UiTransform(0.45f, 0.5f, 0.4f, 12f, 0.85f))
+    private val cuts = listOf(UiCut(1, 0, 4.2f, TransitionStyle.Fade, 0.5f, 3f), UiCut(2, 1, 7.3f, TransitionStyle.None, 0f, 3f))
+    @Test fun layersPanelEmpty() = shot(ThemeMode.Dark) { LayersPanel(null, {}, { _, _ -> }, {}) }
+    @Test fun layersPanelSelected() = shot(ThemeMode.Dark) { LayersPanel(pip, {}, { _, _ -> }, {}) }
+    @Test fun layersPanelLight() = shot(ThemeMode.Light) { LayersPanel(pip.copy(transform = UiTransform(-0.3f, -0.2f, 1.2f, -45f, 0.5f)), {}, { _, _ -> }, {}) }
+    @Test fun transitionPanelFade() = shot(ThemeMode.Dark) { TransitionPanel(cuts, cuts[0], {}, { _, _, _ -> }) }
+    @Test fun transitionPanelNone() = shot(ThemeMode.Light) { TransitionPanel(cuts, cuts[1], {}, { _, _, _ -> }) }
+    @Test fun transitionPanelNoCuts() = shot(ThemeMode.Dark) { TransitionPanel(emptyList(), null, {}, { _, _, _ -> }) }
+    // Image layer: a video layer starts an ExoPlayer, which layoutlib cannot run.
+    @Test fun editorLayers() = shot(ThemeMode.Dark) { EditorScreen(ui().copy(layers = listOf(pip.copy(source = "logo.png", isImage = true)), cuts = cuts), { 2.4f }, initialTool = TOOL_LAYERS) }
+    @Test fun editorTransition() = shot(ThemeMode.Dark) { EditorScreen(ui().copy(layers = listOf(pip.copy(source = "logo.png", isImage = true)), cuts = cuts), { 4.0f }, initialTool = TOOL_TRANSITION) }
     private fun w(s: Long, e: Long, t: String) = uniffi.clio_ffi.CaptionWord(s.toULong(), e.toULong(), t)
     private val ptCaps = listOf(Engine.Cap(2000, 4600, "Atenção: você não vai acreditar!",
         listOf(w(2000, 2600, "Atenção:"), w(2600, 3000, "você"), w(3000, 3400, "não"), w(3400, 3700, "vai"), w(3700, 4600, "acreditar!"))))
