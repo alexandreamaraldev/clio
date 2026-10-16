@@ -403,14 +403,17 @@ mod tests {
     }
 
     #[test]
-    fn delete_ripples_video_but_not_audio_lanes() {
+    fn delete_ripples_only_the_main_track() {
         let (p, v) = setup();
         let a = p.append_clip(v, "a".into(), "a.mp4".into(), 1000).unwrap();
         let b = p.append_clip(v, "b".into(), "b.mp4".into(), 2000).unwrap();
-        let x = p.add_voiceover("x.m4a".into(), 0, 1000).unwrap();
-        let y = p.add_voiceover("y.m4a".into(), 4000, 1000).unwrap();
-        assert!(p.remove_clip(x));
-        assert_eq!(clip(&p, y).start_ms, 4000, "audio lane keeps positions");
+        let sfx: Vec<u64> = [0, 1000, 3000].iter().map(|&t| p.add_audio_clip("Efeitos".into(), "s".into(), "s.ogg".into(), t, 500).unwrap()).collect();
+        assert!(p.remove_clip(sfx[1]));
+        assert_eq!(clip(&p, sfx[2]).start_ms, 3000, "audio lane keeps positions");
+        let tt = p.add_track(TrackKind::Text, "T".into());
+        let txt: Vec<u64> = [0, 1000, 3000].iter().map(|&t| p.insert_clip(tt, "Oi".into(), String::new(), t, 500).unwrap()).collect();
+        assert!(p.remove_clip(txt[1]));
+        assert_eq!(clip(&p, txt[2]).start_ms, 3000, "text lane keeps positions");
         assert!(p.remove_clip(a));
         assert_eq!(clip(&p, b).start_ms, 0, "main track still ripples");
     }

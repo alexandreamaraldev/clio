@@ -110,7 +110,8 @@ class Exporter(private val context: Context) {
         }
         val seqs = mutableListOf(EditedMediaItemSequence(items))
         seqs += AudioExport.sequences(context, snap, totalMs, ::audioChain)
-        return Composition.Builder(seqs).experimentalSetForceAudioTrack(true).build()
+        return Composition.Builder(seqs).experimentalSetForceAudioTrack(true)
+            .setEffects(Effects(listOf(LimiterProcessor()), emptyList())).build()
     }
 
     private suspend fun run(composition: Composition, out: File, onProgress: (Float) -> Unit) = coroutineScope {
@@ -218,7 +219,7 @@ private class GainProcessor(private val durMs: Long, private val volume: Float, 
         val src = input.order(ByteOrder.nativeOrder())
         while (src.remaining() >= 2 * ch) {
             val g = Mix.gain(frames * 1000 / rate, durMs, volume, fadeInMs, fadeOutMs, muted)
-            repeat(ch) { out.putShort((AudioGain.limit(src.short * g / 32768f) * 32767f).toInt().toShort()) }
+            repeat(ch) { out.putShort((src.short * g).toInt().coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort()) }
             frames++
         }
         input.position(input.limit())

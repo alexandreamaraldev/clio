@@ -64,7 +64,11 @@ object Waveforms {
     }
 
     internal fun readPeaks(f: File): FloatArray? = runCatching {
-        DataInputStream(f.inputStream().buffered()).use { i -> FloatArray(i.readInt()) { i.readFloat() } }
+        DataInputStream(f.inputStream().buffered()).use { i ->
+            val n = i.readInt()
+            require(n in 0..100_000 && f.length() == 4L + 4L * n) { "corrupt peaks cache" }
+            FloatArray(n) { i.readFloat() }
+        }
     }.getOrNull()
 
     internal fun writePeaks(dir: File, f: File, p: FloatArray) {

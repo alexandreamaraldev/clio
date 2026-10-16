@@ -133,7 +133,7 @@ private fun EditorRoute(draftId: String, isNew: Boolean, initialTool: Int, impor
     // Leaving the app mid-take finishes the recording and keeps it.
     val lifecycle = @Suppress("DEPRECATION") androidx.compose.ui.platform.LocalLifecycleOwner.current.lifecycle
     DisposableEffect(lifecycle, vm) {
-        val o = androidx.lifecycle.LifecycleEventObserver { _, e -> if (e == androidx.lifecycle.Lifecycle.Event.ON_STOP) vm.finishVoiceover() }
+        val o = androidx.lifecycle.LifecycleEventObserver { _, e -> if (e == androidx.lifecycle.Lifecycle.Event.ON_STOP && activity?.isChangingConfigurations != true) vm.finishVoiceover() }
         lifecycle.addObserver(o)
         onDispose { lifecycle.removeObserver(o) }
     }

@@ -45,9 +45,9 @@ class AudioTest {
     }
 
     @Test fun voiceoverOffset() {
-        assertEquals(120L, VoiceoverRecorder.offset(5_120, 5_000))
-        assertEquals(0L, VoiceoverRecorder.offset(4_900, 5_000))
-        assertEquals(1_000L, VoiceoverRecorder.offset(9_000, 5_000))
+        assertEquals(120L, VoiceoverRecorder.offset(5_000, 5_120))
+        assertEquals(0L, VoiceoverRecorder.offset(5_000, 4_900))
+        assertEquals(1_000L, VoiceoverRecorder.offset(0, 9_000))
     }
 
     @Test fun peaksDiskCacheRoundTrip() {
@@ -56,6 +56,8 @@ class AudioTest {
         Waveforms.writePeaks(dir, f, floatArrayOf(0.1f, 0.9f))
         assertTrue(Waveforms.readPeaks(f)!!.contentEquals(floatArrayOf(0.1f, 0.9f)))
         assertEquals(null, Waveforms.readPeaks(File(dir, "missing")))
+        f.writeBytes(f.readBytes().copyOf(8)) // truncated
+        assertEquals(null, Waveforms.readPeaks(f))
         dir.deleteRecursively()
     }
 }

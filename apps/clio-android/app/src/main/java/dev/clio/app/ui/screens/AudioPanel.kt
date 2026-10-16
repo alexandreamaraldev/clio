@@ -48,7 +48,7 @@ import dev.clio.app.ui.theme.Space
  */
 @Composable
 fun AudioPanel(
-    music: String?, recording: Boolean, canDetach: Boolean,
+    music: String?, recording: Boolean, notice: String?, canDetach: Boolean,
     onPickMusic: () -> Unit, onRemoveMusic: () -> Unit, onRecord: () -> Unit, onDetach: () -> Unit, onSfx: (String) -> Unit,
 ) {
     var credits by remember { mutableStateOf(false) }
@@ -56,7 +56,12 @@ fun AudioPanel(
     Column(Modifier.fillMaxWidth().heightIn(min = 220.dp).padding(horizontal = Space.md)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("Áudio", style = MaterialTheme.typography.titleMedium, color = ClioColors.TextPrimary, modifier = Modifier.weight(1f))
-            if (recording) RecordingTimer()
+            androidx.compose.animation.AnimatedVisibility(notice != null, enter = androidx.compose.animation.fadeIn() + androidx.compose.animation.scaleIn(ClioMotion.snappy(), 0.9f),
+                exit = androidx.compose.animation.fadeOut()) {
+                Text(notice.orEmpty(), style = MaterialTheme.typography.labelMedium, color = ClioColors.OnClay,
+                    modifier = Modifier.testTag("audio-notice").clip(ClioShapes.pill).background(ClioColors.Clay).padding(horizontal = 10.dp, vertical = 4.dp))
+            }
+            if (recording) { Spacer(Modifier.width(Space.sm)); RecordingTimer() }
         }
         Spacer(Modifier.height(Space.sm))
         Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(Space.sm)) {

@@ -138,7 +138,7 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
         val uiTracks = s.tracks.filter { it.clips.isNotEmpty() || it.kind == TrackKind.VIDEO }.map { t ->
             UiTrack(t.name, when (t.kind) { TrackKind.VIDEO -> "video"; TrackKind.AUDIO -> "audio"; TrackKind.TEXT -> "text"; TrackKind.EFFECT -> "fx" },
                 t.clips.map { c -> UiClip(c.name, c.startMs.toFloat() / 1000f, c.durationMs.toFloat() / 1000f, c.id.toLong(), c.source, c.inMs.toFloat() / 1000f,
-                    c.sourceMs.toFloat() / 1000f, c.speed, c.volume, c.fadeInMs.toFloat() / 1000f, c.fadeOutMs.toFloat() / 1000f, c.muted) })
+                    c.sourceMs.toFloat() / 1000f, c.speed, c.volume, c.fadeInMs.toFloat() / 1000f, c.fadeOutMs.toFloat() / 1000f, c.muted, detached = c.detachedTo != null) })
         }
         val caps = s.captions.map { Engine.Cap(it.startMs.toLong(), it.endMs.toLong(), it.text) }
         val withCaps = if (caps.isEmpty()) uiTracks else uiTracks + UiTrack("Legendas", "text",
@@ -321,7 +321,9 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
             val uri = Uri.fromFile(f).toString()
             audio.audition(uri)
             apply(edit { runCatching { addAudioClip(AudioLanes.SFX, s.label, uri, atMs.toULong(), s.durationMs.toULong()) } }, rebuildPlayer = false)
-            android.widget.Toast.makeText(app, "Adicionado em ${"%d:%02d".format(atMs / 60_000, atMs / 1000 % 60)}", android.widget.Toast.LENGTH_SHORT).show()
+            ui = ui.copy(notice = "Adicionado em ${"%d:%02d".format(atMs / 60_000, atMs / 1000 % 60)}")
+            delay(1800)
+            ui = ui.copy(notice = null)
         }
     }
     override fun toggleVoiceover() {

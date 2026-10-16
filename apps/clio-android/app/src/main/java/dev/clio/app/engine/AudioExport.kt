@@ -2,7 +2,11 @@ package dev.clio.app.engine
 
 import android.content.Context
 import androidx.media3.common.MediaItem
+import androidx.media3.common.C
 import androidx.media3.common.audio.AudioProcessor
+import androidx.media3.common.audio.BaseAudioProcessor
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.transformer.EditedMediaItem
 import androidx.media3.transformer.EditedMediaItemSequence
@@ -70,4 +74,20 @@ object AudioExport {
     }
 
     private const val RATE = 44_100L
+}
+
+/** Soft limiter on the final export mix (all lanes summed), so overlapping clips never hard-clip. */
+@androidx.annotation.OptIn(UnstableApi::class)
+class LimiterProcessor : BaseAudioProcessor() {
+    override fun onConfigure(f: AudioProcessor.AudioFormat): AudioProcessor.AudioFormat {
+        if (f.encoding != C.ENCODING_PCM_16BIT) throw AudioProcessor.UnhandledAudioFormatException(f)
+        return f
+    }
+    override fun queueInput(input: ByteBuffer) {
+        val out = replaceOutputBuffer(input.remaining())
+        val src = input.order(ByteOrder.nativeOrder())
+        while (src.remaining() >= 2) out.putShort((AudioGain.limit(src.short / 32768f) * 32767f).toInt().toShort())
+        input.position(input.limit())
+        out.flip()
+    }
 }

@@ -99,6 +99,7 @@ data class EditorUi(
     val music: String? = null,
     val captionStyle: CaptionStyle = CaptionStyle.Clean,
     val recording: Boolean = false,
+    val notice: String? = null,
 )
 
 interface EditorActions {
@@ -219,7 +220,7 @@ fun EditorScreen(
             when (panel) {
                 TOOL_CAPTIONS -> CaptionsPanel(ui.captions, capStyle, ui.captionStatus, actions::setCaptionStyle, actions::generateCaptions, actions::editCaptions)
                 TOOL_TEXT -> TextPanel(ui.texts, actions::addText, actions::editText)
-                TOOL_MUSIC -> AudioPanel(ui.music, ui.recording, target != null && target.source != null && ui.tracks.any { t -> t.kind == "video" && target in t.clips },
+                TOOL_MUSIC -> AudioPanel(ui.music, ui.recording, ui.notice, target != null && target.source != null && !target.detached && ui.tracks.any { t -> t.kind == "video" && target in t.clips },
                     actions::pickMusic, actions::removeMusic, actions::toggleVoiceover, { actions.detachAudio(target?.id) }, actions::addSfx)
                 TOOL_SPEED -> SpeedPanel(target) { actions.setSpeed(target?.id, it) }
                 TOOL_VOLUME -> VolumePanel(target) { v, fi, fo, m -> actions.setAudio(target?.id, v, fi, fo, m) }

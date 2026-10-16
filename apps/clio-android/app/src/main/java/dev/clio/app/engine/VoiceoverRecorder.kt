@@ -13,13 +13,14 @@ import java.io.File
 
 /** Records narration from the mic to AAC/M4A in app storage (kept with the drafts that reference it). */
 class VoiceoverRecorder(private val context: Context) {
-    /** A finished take: [durationMs] is the real length of the m4a; [offsetMs] is how long after
-     *  start() the first audio frame landed (encoder warm-up), added to the timeline start. */
+    /** A finished take: [durationMs] is the real length of the m4a; [offsetMs] is how long the mic took
+     *  to go live after recording was requested (measured at start), added to the timeline start. */
     data class Take(val file: File, val durationMs: Long, val offsetMs: Long) { val uri: String get() = Uri.fromFile(file).toString() }
 
     private var recorder: MediaRecorder? = null
     private var file: File? = null
     private var startedAt = 0L
+    private var startOffset = 0L
     val isRecording: Boolean get() = recorder != null
 
     fun hasPermission(): Boolean =
@@ -39,8 +40,10 @@ class VoiceoverRecorder(private val context: Context) {
             r.setAudioEncodingBitRate(128_000)
             r.setOutputFile(f.path)
             r.prepare()
+            val asked = SystemClock.elapsedRealtime()
+            r.start() // returns once the audio source is running: the first frame is captured from here
             startedAt = SystemClock.elapsedRealtime()
-            r.start()
+            startOffset = offset(asked, startedAt)
             recorder = r; file = f
             true
         } catch (e: Exception) { r.release(); f.delete(); false }
@@ -50,13 +53,12 @@ class VoiceoverRecorder(private val context: Context) {
     fun stop(): Take? {
         val r = recorder ?: return null
         val f = file
-        val wallMs = SystemClock.elapsedRealtime() - startedAt
         recorder = null; file = null
         val ok = runCatching { r.stop() }.isSuccess
         r.release()
         val ms = f?.takeIf { ok }?.let(::durationOf) ?: 0L
         if (f == null || ms < MIN_MS) { f?.delete(); return null }
-        return Take(f, ms, offset(wallMs, ms))
+        return Take(f, ms, startOffset)
     }
 
     private fun durationOf(f: File): Long = runCatching {
@@ -66,7 +68,7 @@ class VoiceoverRecorder(private val context: Context) {
 
     companion object {
         private const val MIN_MS = 300L
-        /** Wall time not covered by audio is the warm-up before the first frame (capped at 1 s). */
-        fun offset(wallMs: Long, fileMs: Long): Long = (wallMs - fileMs).coerceIn(0, 1_000)
+        /** Mic warm-up between the request and the source running (capped at 1 s). */
+        fun offset(askedAt: Long, liveAt: Long): Long = (liveAt - askedAt).coerceIn(0, 1_000)
     }
 }

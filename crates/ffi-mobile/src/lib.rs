@@ -509,8 +509,8 @@ impl ClioProject {
         s.checkpoint();
         let t = &mut s.tracks[ti];
         let gone = t.clips.remove(ci);
-        // Only the main (video) track is magnetic; audio lanes keep their clips' positions.
-        let ripple = if t.kind == TrackKind::Audio { 0 } else { gone.duration_ms };
+        // Only the main (video) track is magnetic; audio and text lanes keep their clips' positions.
+        let ripple = if t.kind == TrackKind::Video { gone.duration_ms } else { 0 };
         for c in &mut t.clips[ci..] {
             c.start_ms = c.start_ms.saturating_sub(ripple);
         }
