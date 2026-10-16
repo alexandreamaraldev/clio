@@ -82,7 +82,7 @@ class EditorE2ETest {
     }
 
     private fun tool(label: String) {
-        compose.onNodeWithTag("tools").performScrollToNode(hasText(label))
+        compose.onNodeWithTag("tools", useUnmergedTree = true).performScrollToNode(hasText(label))
         compose.onNodeWithText(label, useUnmergedTree = true).performClick()
         compose.waitForIdle()
     }
@@ -91,7 +91,7 @@ class EditorE2ETest {
 
     /** Drags the timeline so the playhead moves forward by about [dp]/64 seconds. */
     private fun scrubForward(dp: Float) {
-        compose.onNodeWithTag("timeline").performTouchInput {
+        compose.onNodeWithTag("timeline", useUnmergedTree = true).performTouchInput {
             val y = centerY; val px = dp * density
             down(Offset(centerX + px / 2, y)); repeat(10) { moveBy(Offset(-px / 10, 0f)) }; up()
         }
@@ -137,26 +137,26 @@ class EditorE2ETest {
         assertEquals(6f, src.lenS, 0.3f)
 
         // Trim: select the clip and drag its right handle left.
-        compose.onNodeWithTag("clip-video-0").performClick()
-        compose.onNodeWithTag("trim-right").performTouchInput { down(center); repeat(10) { moveBy(Offset(-12f * density, 0f)) }; up() }
+        compose.onNodeWithTag("clip-video-0", useUnmergedTree = true).performClick()
+        compose.onNodeWithTag("trim-right", useUnmergedTree = true).performTouchInput { down(center); repeat(10) { moveBy(Offset(-12f * density, 0f)) }; up() }
         waitUi("trim") { videoClips(it).single().lenS < src.lenS - 0.5f }
         val trimmed = videoClips().single().lenS
         shot("02-trimmed")
 
         // Split at the playhead, then duplicate the first part.
-        compose.onNodeWithTag("clip-video-0").performClick() // deselect so split uses the playhead
+        compose.onNodeWithTag("clip-video-0", useUnmergedTree = true).performClick() // deselect so split uses the playhead
         scrubForward(96f)
         tool("Dividir")
         waitUi("split") { videoClips(it).size == 2 }
         assertEquals(trimmed, videoClips().sumOf { it.lenS.toDouble() }.toFloat(), 0.05f)
-        compose.onNodeWithTag("clip-video-0").performClick()
+        compose.onNodeWithTag("clip-video-0", useUnmergedTree = true).performClick()
         tool("Duplicar")
         waitUi("duplicate") { videoClips(it).size == 3 }
         shot("03-split-duplicated")
 
         // Reorder: long-press the last clip and drag it to the front.
         val before = videoClips().map { it.id }
-        compose.onNodeWithTag("clip-video-2").performTouchInput {
+        compose.onNodeWithTag("clip-video-2", useUnmergedTree = true).performTouchInput {
             down(center); advanceEventTime(900); repeat(20) { moveBy(Offset(-30f * density, 0f)) }; up()
         }
         waitUi("reorder") { videoClips(it).map { c -> c.id } != before }
@@ -165,7 +165,7 @@ class EditorE2ETest {
 
         // Speed 2x on the first clip: timeline length halves, source span kept.
         val first = videoClips().first()
-        compose.onNodeWithTag("clip-video-0").performClick()
+        compose.onNodeWithTag("clip-video-0", useUnmergedTree = true).performClick()
         tool("Velocidade")
         compose.onNodeWithText("2x").performClick()
         waitUi("speed") { videoClips(it).first().speed == 2f }
@@ -175,7 +175,7 @@ class EditorE2ETest {
 
         // Volume: fade in on the selected clip.
         tool("Volume")
-        compose.onNodeWithTag("fade-in").performSemanticsAction(SemanticsActions.SetProgress) { it(0.5f) }
+        compose.onNodeWithTag("fade-in", useUnmergedTree = true).performSemanticsAction(SemanticsActions.SetProgress) { it(0.5f) }
         waitUi("fade in") { videoClips(it).first().fadeInS > 0.1f }
         shot("06-volume-fade")
         closePanel("Volume")
@@ -217,14 +217,14 @@ class EditorE2ETest {
 
         // Leave the editor (flushes the draft), kill the activity and reopen the draft from Home.
         compose.onNodeWithContentDescription("Voltar").performClick()
-        compose.waitUntil(10_000) { compose.onAllNodesWithTag("draft-0").fetchSemanticsNodes().isNotEmpty() }
+        compose.waitUntil(10_000) { compose.onAllNodesWithTag("draft-0", useUnmergedTree = true).fetchSemanticsNodes().isNotEmpty() }
         Thread.sleep(1500) // autosave runs on the app scope
         scenario!!.close()
         QaHooks.ui = null
         scenario = ActivityScenario.launch(MainActivity::class.java)
-        compose.waitUntil(10_000) { compose.onAllNodesWithTag("draft-0").fetchSemanticsNodes().isNotEmpty() }
+        compose.waitUntil(10_000) { compose.onAllNodesWithTag("draft-0", useUnmergedTree = true).fetchSemanticsNodes().isNotEmpty() }
         shot("11-home")
-        compose.onNodeWithTag("draft-0").performClick()
+        compose.onNodeWithTag("draft-0", useUnmergedTree = true).performClick()
         waitUi("draft reopened") { it.hasMedia }
         shot("12-reopened")
         assertEquals(2, videoClips().size)
