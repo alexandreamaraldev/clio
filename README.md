@@ -1,3 +1,5 @@
+<img src="docs/brand-clio/play-store-512.png" width="96" alt="Clio icon">
+
 # Clio
 
 **A mobile-first video editor for Android.** Calm, minimal and quick: import, cut, caption,
