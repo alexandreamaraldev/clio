@@ -1,0 +1,394 @@
+//! Phase 4 speed curves (speed ramps).
+//!
+//! A curve is a list of control points over the clip's *source* range: `x` is 0..1 of the source
+//! span, `speed` is 0.1x..10x. Between points the speed is a monotone cubic in log2(speed), so a ramp
+//! never overshoots its points. The clip keeps its plain fields consistent with the curve:
+//! `speed` is the average speed (`span / duration`) and `duration_ms` the integrated timeline
+//! length. Because a curve only describes the shape, trims that keep the average speed (the normal
+//! trim path) stay valid, and [`curve_segments`] always rescales the shape so it fills exactly
+//! `duration_ms`. Preview and export both use [`curve_segments`] (piecewise-constant speed per
+//! source segment), so they agree with the timeline to the millisecond.
+
+use crate::{ClioError, ClioProject, State, TrackKind, MAX_SPEED, MIN_CLIP_MS, MIN_SPEED};
+
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, uniffi::Record)]
+pub struct SpeedPoint {
+    /// Position in the clip's source range, 0..1.
+    pub x: f32,
+    pub speed: f32,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, uniffi::Record)]
+pub struct SpeedCurve {
+    /// Preset id from [`speed_presets`], or "personalizado".
+    pub preset: String,
+    pub points: Vec<SpeedPoint>,
+}
+
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct ClipSpeedCurve {
+    pub clip_id: u64,
+    pub curve: SpeedCurve,
+}
+
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct SpeedPreset {
+    pub id: String,
+    pub label: String,
+    pub curve: SpeedCurve,
+}
+
+/// One piece of the piecewise-constant playback plan: from `src_ms` (offset from the clip's
+/// in-point) until the next segment, play at `speed`.
+#[derive(Debug, Clone, Copy, PartialEq, uniffi::Record)]
+pub struct SpeedSegment {
+    pub src_ms: u64,
+    pub speed: f32,
+}
+
+pub const CUSTOM: &str = "personalizado";
+pub const MAX_CURVE_POINTS: usize = 12;
+/// Source segments per curve in the playback plan (fine enough to look smooth, few enough that
+/// Media3's speed provider stays cheap).
+pub const CURVE_SEGMENTS: usize = 48;
+
+const PRESETS: &[(&str, &str, &[(f32, f32)])] = &[
+    ("montagem", "Montagem", &[(0.0, 2.5), (0.35, 0.5), (0.65, 0.5), (1.0, 2.5)]),
+    ("heroi", "Herói", &[(0.0, 1.5), (0.4, 0.3), (0.6, 0.3), (1.0, 1.5)]),
+    ("bala", "Bala", &[(0.0, 2.0), (0.45, 0.15), (0.55, 0.15), (1.0, 2.0)]),
+    ("flash_in", "Flash de entrada", &[(0.0, 5.0), (0.5, 1.0), (1.0, 1.0)]),
+    ("flash_out", "Flash de saída", &[(0.0, 1.0), (0.5, 1.0), (1.0, 5.0)]),
+];
+
+fn curve_of(id: &str, pts: &[(f32, f32)]) -> SpeedCurve {
+    SpeedCurve { preset: id.into(), points: pts.iter().map(|&(x, speed)| SpeedPoint { x, speed }).collect() }
+}
+
+/// Built-in ramps (pt-BR labels), in chip order. "Personalizado" is any edited curve.
+#[uniffi::export]
+pub fn speed_presets() -> Vec<SpeedPreset> {
+    PRESETS.iter().map(|(id, label, p)| SpeedPreset { id: (*id).into(), label: (*label).into(), curve: curve_of(id, p) }).collect()
+}
+
+impl SpeedCurve {
+    /// Sorted, clamped, deduplicated, endpoints at 0 and 1, 2..=MAX_CURVE_POINTS points.
+    pub fn sanitized(&self) -> Result<Self, ClioError> {
+        let mut p: Vec<SpeedPoint> = self.points.iter().filter(|p| p.x.is_finite() && p.speed.is_finite())
+            .map(|p| SpeedPoint { x: p.x.clamp(0.0, 1.0), speed: p.speed.clamp(MIN_SPEED, MAX_SPEED) }).collect();
+        p.sort_by(|a, b| a.x.total_cmp(&b.x));
+        p.dedup_by(|b, a| (b.x - a.x).abs() < 1e-3);
+        if p.len() < 2 {
+            return Err(ClioError::Invalid { msg: "a curve needs at least two points".into() });
+        }
+        p.truncate(MAX_CURVE_POINTS);
+        p.first_mut().unwrap().x = 0.0;
+        p.last_mut().unwrap().x = 1.0;
+        let preset = if PRESETS.iter().any(|(id, ..)| *id == self.preset) { self.preset.clone() } else { CUSTOM.into() };
+        Ok(SpeedCurve { preset, points: p })
+    }
+
+    /// Speed at source position `x` (0..1): monotone cubic (Fritsch–Carlson) in log2(speed).
+    pub fn speed_at(&self, x: f32) -> f32 {
+        let p = &self.points;
+        let x = x.clamp(0.0, 1.0);
+        let i = p.windows(2).position(|w| x <= w[1].x).unwrap_or(p.len() - 2);
+        let y: Vec<f32> = p.iter().map(|q| q.speed.log2()).collect();
+        let d: Vec<f32> = p.windows(2).zip(y.windows(2)).map(|(w, v)| (v[1] - v[0]) / (w[1].x - w[0].x).max(1e-6)).collect();
+        let tangent = |k: usize| -> f32 {
+            if k == 0 { return d[0]; }
+            if k == p.len() - 1 { return d[k - 1]; }
+            let (a, b) = (d[k - 1], d[k]);
+            if a * b <= 0.0 { 0.0 } else { 2.0 / (1.0 / a + 1.0 / b) }
+        };
+        let h = (p[i + 1].x - p[i].x).max(1e-6);
+        let t = ((x - p[i].x) / h).clamp(0.0, 1.0);
+        let (t2, t3) = (t * t, t * t * t);
+        let v = (2.0 * t3 - 3.0 * t2 + 1.0) * y[i] + (t3 - 2.0 * t2 + t) * h * tangent(i) + (-2.0 * t3 + 3.0 * t2) * y[i + 1] + (t3 - t2) * h * tangent(i + 1);
+        v.exp2().clamp(MIN_SPEED, MAX_SPEED)
+    }
+
+    /// Average speed over the source range (source length / timeline length), for N segments.
+    pub fn mean_speed(&self) -> f64 {
+        let n = CURVE_SEGMENTS as f64;
+        let inv: f64 = (0..CURVE_SEGMENTS).map(|i| 1.0 / self.speed_at(((i as f64 + 0.5) / n) as f32) as f64).sum::<f64>() / n;
+        1.0 / inv
+    }
+
+    /// The part of this curve between source positions `a` and `b`, renormalised to 0..1.
+    fn sub(&self, a: f32, b: f32) -> SpeedCurve {
+        let w = (b - a).max(1e-6);
+        let mut pts = vec![SpeedPoint { x: 0.0, speed: self.speed_at(a) }];
+        pts.extend(self.points.iter().filter(|p| p.x > a + 1e-3 && p.x < b - 1e-3).map(|p| SpeedPoint { x: (p.x - a) / w, speed: p.speed }));
+        pts.push(SpeedPoint { x: 1.0, speed: self.speed_at(b) });
+        pts.truncate(MAX_CURVE_POINTS);
+        pts.last_mut().unwrap().x = 1.0;
+        SpeedCurve { preset: CUSTOM.into(), points: pts }
+    }
+}
+
+/// Playback plan for a clip: `CURVE_SEGMENTS` equal source pieces, each with a constant speed,
+/// rescaled so the timeline length is exactly `duration_ms` for a source span of `span_ms`.
+#[uniffi::export]
+pub fn curve_segments(curve: SpeedCurve, span_ms: u64, duration_ms: u64) -> Vec<SpeedSegment> {
+    let Ok(c) = curve.sanitized() else { return vec![SpeedSegment { src_ms: 0, speed: 1.0 }] };
+    let n = CURVE_SEGMENTS;
+    let raw: Vec<f64> = (0..n).map(|i| c.speed_at(((i as f64 + 0.5) / n as f64) as f32) as f64).collect();
+    let dur_raw: f64 = raw.iter().map(|v| span_ms as f64 / n as f64 / v).sum();
+    let k = if duration_ms > 0 && dur_raw > 0.0 { dur_raw / duration_ms as f64 } else { 1.0 };
+    (0..n).map(|i| SpeedSegment { src_ms: (span_ms as f64 * i as f64 / n as f64).round() as u64, speed: (raw[i] * k) as f32 }).collect()
+}
+
+impl State {
+    pub(crate) fn copy_speed_curve(&mut self, from: u64, to: u64) {
+        if let Some(c) = self.speed_curves.get(&from).cloned() {
+            self.speed_curves.insert(to, c);
+        }
+    }
+    pub(crate) fn prune_speed_curves(&mut self) {
+        let live: std::collections::BTreeSet<u64> = self.tracks.iter().flat_map(|t| t.clips.iter().map(|c| c.id)).collect();
+        self.speed_curves.retain(|id, _| live.contains(id));
+    }
+    pub(crate) fn clip_speed_curves(&self) -> Vec<ClipSpeedCurve> {
+        self.speed_curves.iter().filter(|(id, _)| self.find(**id).is_some()).map(|(id, c)| ClipSpeedCurve { clip_id: *id, curve: c.clone() }).collect()
+    }
+
+    /// After `split_clip` cut `left` at timeline offset `left.duration_ms`, give both halves the
+    /// matching part of the curve and the right source offsets (a curve maps time non-linearly,
+    /// so the generic split's constant-speed in-point is replaced).
+    pub(crate) fn split_speed_curve(&mut self, left: u64, right: u64) {
+        let Some(curve) = self.speed_curves.get(&left).cloned() else { return };
+        let (Some((ti, li)), Some((_, ri))) = (self.find(left), self.find(right)) else { return };
+        let (l, r) = (self.tracks[ti].clips[li].clone(), self.tracks[ti].clips[ri].clone());
+        let total = l.duration_ms + r.duration_ms;
+        let span = (total as f64 * l.speed as f64).round() as u64;
+        // Source position reached at timeline offset l.duration_ms.
+        let segs = curve_segments(curve.clone(), span, total);
+        let seg_src = span as f64 / segs.len() as f64;
+        let (mut t, mut src) = (0.0f64, 0.0f64);
+        for s in &segs {
+            let dt = seg_src / s.speed as f64;
+            if t + dt >= l.duration_ms as f64 {
+                src += (l.duration_ms as f64 - t) * s.speed as f64;
+                break;
+            }
+            t += dt;
+            src += seg_src;
+        }
+        let left_span = (src.round() as u64).clamp(1, span.saturating_sub(1).max(1));
+        let u = (left_span as f64 / span.max(1) as f64) as f32;
+        let (lc, rc) = (curve.sub(0.0, u), curve.sub(u, 1.0));
+        let x = &mut self.tracks[ti].clips[li];
+        x.speed = (left_span as f64 / l.duration_ms.max(1) as f64) as f32;
+        let x = &mut self.tracks[ti].clips[ri];
+        x.in_ms = l.in_ms + left_span;
+        x.speed = ((span - left_span) as f64 / r.duration_ms.max(1) as f64) as f32;
+        self.speed_curves.insert(left, lc);
+        self.speed_curves.insert(right, rc);
+    }
+}
+
+#[uniffi::export]
+impl ClioProject {
+    /// Applies a speed curve to a main-track video clip (one undo step). The source range is
+    /// kept; the timeline length becomes the integrated curve (`span / mean speed`).
+    pub fn set_speed_curve(&self, clip_id: u64, curve: SpeedCurve) -> Result<(), ClioError> {
+        let curve = curve.sanitized()?;
+        let mut s = self.st();
+        let (ti, ci) = s.find(clip_id).ok_or_else(|| ClioError::Invalid { msg: format!("no clip {clip_id}") })?;
+        let c = &s.tracks[ti].clips[ci];
+        if s.tracks[ti].kind != TrackKind::Video || c.source_ms == 0 {
+            return Err(ClioError::Invalid { msg: "speed curves apply to main-track videos".into() });
+        }
+        if c.detached_to.is_some() {
+            return Err(ClioError::Invalid { msg: "reattach the audio before using a speed curve".into() });
+        }
+        if s.speed_curves.get(&clip_id) == Some(&curve) {
+            return Ok(());
+        }
+        let span = c.span_ms();
+        let mean = curve.mean_speed();
+        s.checkpoint();
+        let x = &mut s.tracks[ti].clips[ci];
+        x.duration_ms = ((span as f64 / mean).round() as u64).max(MIN_CLIP_MS.min(span.max(1)));
+        x.speed = (span as f64 / x.duration_ms as f64) as f32;
+        x.fade_in_ms = x.fade_in_ms.min(x.duration_ms);
+        x.fade_out_ms = x.fade_out_ms.min(x.duration_ms - x.fade_in_ms);
+        s.speed_curves.insert(clip_id, curve);
+        s.relayout(ti);
+        Ok(())
+    }
+
+    /// Applies a preset by id (see [`speed_presets`]).
+    pub fn set_speed_preset(&self, clip_id: u64, preset: String) -> Result<(), ClioError> {
+        let (id, _, p) = PRESETS.iter().find(|(id, ..)| *id == preset).ok_or_else(|| ClioError::Invalid { msg: format!("no preset {preset}") })?;
+        self.set_speed_curve(clip_id, curve_of(id, p))
+    }
+
+    /// Back to a constant speed (the curve's average, so the timeline doesn't jump).
+    pub fn clear_speed_curve(&self, clip_id: u64) -> Result<(), ClioError> {
+        let mut s = self.st();
+        if !s.speed_curves.contains_key(&clip_id) {
+            return Ok(());
+        }
+        s.checkpoint();
+        s.speed_curves.remove(&clip_id);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn proj() -> (ClioProject, u64, u64) {
+        let p = ClioProject::new("t".into(), 1080, 1920).unwrap();
+        let v = p.add_track(TrackKind::Video, "V".into());
+        let a = p.append_clip(v, "a".into(), "a.mp4".into(), 4000).unwrap();
+        let b = p.append_clip(v, "b".into(), "b.mp4".into(), 3000).unwrap();
+        p.set_clip_source_info(a, 10_000, 1280, 720).unwrap();
+        p.set_clip_source_info(b, 10_000, 1280, 720).unwrap();
+        (p, a, b)
+    }
+    fn clip(p: &ClioProject, id: u64) -> crate::Clip {
+        p.tracks().into_iter().flat_map(|t| t.clips).find(|c| c.id == id).unwrap()
+    }
+    fn curve(p: &ClioProject, id: u64) -> Option<SpeedCurve> {
+        p.snapshot().speed_curves.into_iter().find(|c| c.clip_id == id).map(|c| c.curve)
+    }
+    fn timeline_ms(segs: &[SpeedSegment], span: u64) -> f64 {
+        let w = span as f64 / segs.len() as f64;
+        segs.iter().map(|s| w / s.speed as f64).sum()
+    }
+
+    #[test]
+    fn interpolation_hits_points_and_never_overshoots() {
+        let c = speed_presets().into_iter().find(|p| p.id == "bala").unwrap().curve;
+        for p in &c.points {
+            assert!((c.speed_at(p.x) - p.speed).abs() < 1e-3);
+        }
+        for i in 0..=100 {
+            let v = c.speed_at(i as f32 / 100.0);
+            assert!((0.15 - 1e-3..=2.0 + 1e-3).contains(&v), "{v}");
+        }
+        // Flat between equal points (monotone: no wiggle).
+        assert!((c.speed_at(0.5) - 0.15).abs() < 1e-3);
+    }
+
+    /// Shared with the Kotlin drawing code (CurveShapeTest uses the same numbers).
+    #[test]
+    fn reference_values() {
+        let c = SpeedCurve { preset: CUSTOM.into(), points: vec![SpeedPoint { x: 0.0, speed: 1.0 }, SpeedPoint { x: 0.5, speed: 4.0 }, SpeedPoint { x: 1.0, speed: 0.5 }] };
+        for (x, want) in [(0.25f32, 2.0f32), (0.5, 4.0), (0.75, 1.4142)] {
+            let got = c.speed_at(x);
+            assert!((got - want).abs() < 0.08, "x={x}: {got}");
+        }
+    }
+
+    #[test]
+    fn duration_is_the_integral_and_segments_fill_it_exactly() {
+        let (p, a, _) = proj();
+        let span = clip(&p, a).duration_ms; // speed 1
+        p.set_speed_preset(a, "heroi".into()).unwrap();
+        let c = clip(&p, a);
+        let mean = curve(&p, a).unwrap().mean_speed();
+        assert_eq!(c.duration_ms, (span as f64 / mean).round() as u64);
+        assert!(c.duration_ms > span, "hero slows down overall");
+        let segs = curve_segments(curve(&p, a).unwrap(), span, c.duration_ms);
+        assert!((timeline_ms(&segs, span) - c.duration_ms as f64).abs() < 1.0);
+        // Main track ripples: b starts where a ends.
+        assert_eq!(clip(&p, p.tracks()[0].clips[1].id).start_ms, c.duration_ms);
+    }
+
+    #[test]
+    fn undo_redo_and_drafts() {
+        let (p, a, _) = proj();
+        let before = clip(&p, a).duration_ms;
+        p.set_speed_preset(a, "bala".into()).unwrap();
+        let after = clip(&p, a).duration_ms;
+        assert!(p.undo());
+        assert_eq!(clip(&p, a).duration_ms, before);
+        assert!(curve(&p, a).is_none());
+        assert!(p.redo());
+        assert_eq!(clip(&p, a).duration_ms, after);
+        let q = ClioProject::from_draft_json(p.to_draft_json().unwrap()).unwrap();
+        assert_eq!(curve(&q, a).unwrap().preset, "bala");
+        let old = p.to_draft_json().unwrap().replace("\"speed_curves\":", "\"_x\":");
+        assert!(curve(&ClioProject::from_draft_json(old).unwrap(), a).is_none());
+    }
+
+    #[test]
+    fn trim_keeps_the_curve_valid() {
+        let (p, a, _) = proj();
+        p.set_speed_preset(a, "montagem".into()).unwrap();
+        let c = clip(&p, a);
+        p.trim_clip(a, 500, c.duration_ms / 2).unwrap();
+        let t = clip(&p, a);
+        let span = (t.duration_ms as f64 * t.speed as f64).round() as u64;
+        let segs = curve_segments(curve(&p, a).unwrap(), span, t.duration_ms);
+        assert!((timeline_ms(&segs, span) - t.duration_ms as f64).abs() < 1.0);
+        assert!(t.in_ms + span <= 10_000);
+    }
+
+    #[test]
+    fn split_gives_each_half_its_part() {
+        let (p, a, _) = proj();
+        p.set_speed_preset(a, "bala".into()).unwrap();
+        let c = clip(&p, a);
+        let span = (c.duration_ms as f64 * c.speed as f64).round() as u64;
+        let r = p.split_clip(a, c.duration_ms / 2).unwrap();
+        let (l, rr) = (clip(&p, a), clip(&p, r));
+        assert_eq!(l.duration_ms + rr.duration_ms, c.duration_ms, "timeline unchanged");
+        let lspan = (l.duration_ms as f64 * l.speed as f64).round() as u64;
+        let rspan = (rr.duration_ms as f64 * rr.speed as f64).round() as u64;
+        assert!((lspan + rspan).abs_diff(span) <= 2);
+        assert_eq!(rr.in_ms, c.in_ms + lspan);
+        // Bala is symmetric, so the middle of the timeline is the middle of the source.
+        assert!((lspan as i64 - (span / 2) as i64).abs() < (span / 20) as i64, "{lspan} vs {span}");
+        // Left half ends slow, right half starts slow.
+        assert!(curve(&p, a).unwrap().points.last().unwrap().speed < 0.3);
+        assert!(curve(&p, r).unwrap().points.first().unwrap().speed < 0.3);
+    }
+
+    #[test]
+    fn constant_speed_and_clear_and_delete() {
+        let (p, a, _) = proj();
+        p.set_speed_preset(a, "heroi".into()).unwrap();
+        p.set_clip_speed(a, 2.0).unwrap();
+        assert!(curve(&p, a).is_none(), "a constant speed replaces the curve");
+        p.set_speed_preset(a, "heroi".into()).unwrap();
+        let d = clip(&p, a).duration_ms;
+        p.clear_speed_curve(a).unwrap();
+        assert_eq!(clip(&p, a).duration_ms, d, "clearing keeps the average speed");
+        p.set_speed_preset(a, "heroi".into()).unwrap();
+        let dup = p.duplicate_clip(a).unwrap();
+        assert_eq!(curve(&p, dup).unwrap().preset, "heroi");
+        assert!(p.remove_clip(a));
+        assert!(curve(&p, a).is_none());
+        assert!(p.undo());
+        assert!(curve(&p, a).is_some());
+    }
+
+    #[test]
+    fn transitions_stay_valid() {
+        let (p, a, _) = proj();
+        p.set_transition(a, crate::TransitionKind::Fade, 1500).unwrap();
+        p.set_speed_preset(a, "flash_in".into()).unwrap(); // shortens a
+        let c = clip(&p, a);
+        assert!(c.transition.duration_ms <= c.duration_ms);
+    }
+
+    #[test]
+    fn sanitize_and_kinds() {
+        let (p, a, _) = proj();
+        let junk = SpeedCurve { preset: "x".into(), points: vec![SpeedPoint { x: 0.7, speed: 99.0 }, SpeedPoint { x: f32::NAN, speed: 1.0 }, SpeedPoint { x: 0.2, speed: 0.0 }] };
+        p.set_speed_curve(a, junk).unwrap();
+        let c = curve(&p, a).unwrap();
+        assert_eq!(c.preset, CUSTOM);
+        assert_eq!(c.points, vec![SpeedPoint { x: 0.0, speed: MIN_SPEED }, SpeedPoint { x: 1.0, speed: MAX_SPEED }]);
+        let one = SpeedCurve { preset: CUSTOM.into(), points: vec![SpeedPoint { x: 0.5, speed: 1.0 }] };
+        assert!(p.set_speed_curve(a, one).is_err());
+        let t = p.add_track(TrackKind::Text, "T".into());
+        let txt = p.append_clip(t, "oi".into(), "".into(), 1000).unwrap();
+        assert!(p.set_speed_preset(txt, "bala".into()).is_err());
+    }
+}
