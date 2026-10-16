@@ -11,6 +11,8 @@ uniffi::setup_scaffolding!();
 mod audio;
 pub use audio::waveform_peaks;
 mod layers;
+mod look;
+pub use look::*;
 pub use layers::*;
 mod text;
 pub use text::*;
@@ -146,6 +148,9 @@ struct State {
     /// Styles of text clips by clip id.
     #[serde(default)]
     text_styles: std::collections::BTreeMap<u64, TextStyle>,
+    /// Colour grades of video/layer clips by clip id (phase 4 look).
+    #[serde(default)]
+    grades: std::collections::BTreeMap<u64, ColorGrade>,
     #[serde(skip)]
     history: History,
 }
@@ -162,6 +167,7 @@ struct Snap {
     tracks: Vec<Track>,
     captions: Vec<Caption>,
     text_styles: std::collections::BTreeMap<u64, TextStyle>,
+    grades: std::collections::BTreeMap<u64, ColorGrade>,
 }
 
 #[derive(Default)]
@@ -174,7 +180,7 @@ const MAX_UNDO: usize = 100;
 
 impl State {
     fn snap(&self) -> Snap {
-        Snap { name: self.project.name.clone(), width: self.width, height: self.height, fill: self.fill, blur_bg: self.blur_bg, next_id: self.next_id, tracks: self.tracks.clone(), captions: self.captions.clone(), text_styles: self.text_styles.clone() }
+        Snap { name: self.project.name.clone(), width: self.width, height: self.height, fill: self.fill, blur_bg: self.blur_bg, next_id: self.next_id, tracks: self.tracks.clone(), captions: self.captions.clone(), text_styles: self.text_styles.clone(), grades: self.grades.clone() }
     }
     fn restore(&mut self, x: Snap) {
         self.project.name = x.name;
@@ -186,6 +192,7 @@ impl State {
         self.tracks = x.tracks;
         self.captions = x.captions;
         self.text_styles = x.text_styles;
+        self.grades = x.grades;
     }
     /// Record the current state before a mutation.
     fn checkpoint(&mut self) {
@@ -232,6 +239,9 @@ pub struct Snapshot {
     pub can_redo: bool,
     pub fill: bool,
     pub blur_bg: bool,
+    /// Non-neutral colour grades by clip (last, with a default, so existing constructors keep working).
+    #[uniffi(default = [])]
+    pub grades: Vec<ClipGrade>,
 }
 
 /// Draft file format version (bump on breaking changes).
@@ -265,7 +275,7 @@ impl ClioProject {
                 captions: Vec::new(),
                 fill: false,
                 blur_bg: false,
-                text_styles: Default::default(), speech_language: None, history: History::default(),
+                text_styles: Default::default(), grades: Default::default(), speech_language: None, history: History::default(),
             }),
         })
     }
@@ -292,6 +302,7 @@ impl ClioProject {
     pub fn to_draft_json(&self) -> Result<String, ClioError> {
         let mut s = self.st();
         s.prune_text_styles();
+        s.prune_grades();
         #[derive(serde::Serialize)]
         struct DraftRef<'a> { version: u32, state: &'a State }
         serde_json::to_string(&DraftRef { version: DRAFT_VERSION, state: &s }).map_err(|e| ClioError::Serialize { msg: e.to_string() })
@@ -517,6 +528,7 @@ impl ClioProject {
             tracks: s.tracks.clone(),
             captions: s.captions.clone(),
             text_styles: s.styled_texts(),
+            grades: s.clip_grades(),
             speech_language: s.speech_language.clone(),
             can_undo: !s.history.undo.is_empty(),
             can_redo: !s.history.redo.is_empty(),
@@ -546,6 +558,7 @@ impl ClioProject {
         s.remove_linked(&gone);
         s.clamp_transitions(ti);
         s.prune_text_styles();
+        s.prune_grades();
         true
     }
 
@@ -607,6 +620,7 @@ impl ClioProject {
                 s.next_id += 1;
                 s.sync_links();
                 s.copy_text_style(clip_id, new_id);
+                s.copy_grade(clip_id, new_id);
                 s.history.undo.push(before);
                 s.history.redo.clear();
                 return Ok(new_id);
