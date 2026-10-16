@@ -49,12 +49,15 @@ data class ExportSpec(val label: String, val width: Int, val height: Int, val fp
  */
 @OptIn(UnstableApi::class)
 class Exporter(private val context: Context) {
-    private val gradeLib by lazy { Grades.Library(context) }
+    private val gradeLib by lazy { Grades.library(context) }
     /** Diagnostics toggle used by the device QA export matrix. */
     internal var frameDrop = true
 
     /** Layer decode counters from the last export (bench/QA diagnostics). */
     data class LayerStats(val decodedFrames: Int, val requestedFrames: Int)
+    private var toneMap = false
+    /** pt-BR notice about the last export (e.g. HDR grade skipped), or null. */
+    @Volatile var lastNotice: String? = null; private set
     @Volatile internal var lastLayerStats = LayerStats(0, 0); private set
 
     companion object {
@@ -82,7 +85,13 @@ class Exporter(private val context: Context) {
             StyledTextItem(c.name, c.startMs.toLong(), (c.startMs + c.durationMs).toLong(), snap.textStyles.firstOrNull { it.clipId == c.id }?.style ?: StyledText.defaultStyle)
         }
         val caps = snap.captions
-        val gradeOf = Grades.byClip(snap.grades)
+        // Media3 1.4's LUT shader is SDR-only (checkArgument(!useHdr)). Graded HDR clips are tone-mapped
+        // to SDR on the GPU (API 29+); below that their grade is skipped and [lastNotice] says so.
+        val graded = Grades.byClip(snap.grades)
+        val hdrGraded = video.any { graded.containsKey(it.id.toLong()) && !MediaKind.isImage(context, it.source) && HdrProbe.isHdr(context, it.source) }
+        toneMap = hdrGraded && android.os.Build.VERSION.SDK_INT >= 29
+        lastNotice = if (hdrGraded && !toneMap) "Vídeo HDR: os filtros foram ignorados nesta exportação (requer Android 10 ou mais recente)." else null
+        val gradeOf = if (hdrGraded && !toneMap) graded.filterKeys { id -> video.first { it.id.toLong() == id }.let { MediaKind.isImage(context, it.source) || !HdrProbe.isHdr(context, it.source) } } else graded
         val totalMs = snap.summary.durationMs.toLong()
         val blur = snap.blurBg && !snap.fill
 
@@ -128,6 +137,7 @@ class Exporter(private val context: Context) {
         val seqs = mutableListOf(EditedMediaItemSequence(items))
         seqs += AudioExport.sequences(context, snap, totalMs, chain = ::audioChain)
         return Composition.Builder(seqs).experimentalSetForceAudioTrack(true)
+            .apply { if (toneMap) setHdrMode(Composition.HDR_MODE_TONE_MAP_HDR_TO_SDR_USING_OPEN_GL) }
             .setEffects(Effects(listOf(LimiterProcessor()), emptyList())).build()
     }
 

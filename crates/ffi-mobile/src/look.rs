@@ -128,8 +128,9 @@ impl ClioProject {
     pub fn set_clip_grade(&self, clip_id: u64, grade: ColorGrade) -> Result<(), ClioError> {
         let mut s = self.st();
         let (ti, _ci) = s.find(clip_id).ok_or_else(|| ClioError::Invalid { msg: format!("no clip {clip_id}") })?;
-        if !matches!(s.tracks[ti].kind, TrackKind::Video | TrackKind::Overlay) {
-            return Err(ClioError::Invalid { msg: "grade applies to video and layer clips".into() });
+        // Only main-track clips are graded (preview and export); layers/PIP and text are not.
+        if s.tracks[ti].kind != TrackKind::Video {
+            return Err(ClioError::Invalid { msg: "grade applies to main video clips only".into() });
         }
         let g = grade.sanitized();
         if s.grade(clip_id) == g {
@@ -145,6 +146,10 @@ impl ClioProject {
         let mut s = self.st();
         s.find(clip_id).ok_or_else(|| ClioError::Invalid { msg: format!("no clip {clip_id}") })?;
         let g = s.grade(clip_id);
+        // A neutral source would silently wipe every clip's grade; refuse it.
+        if grade_is_neutral(g.clone()) {
+            return Err(ClioError::Invalid { msg: "source clip has no grade".into() });
+        }
         let ids: Vec<u64> = s.tracks.iter().filter(|t| t.kind == TrackKind::Video).flat_map(|t| t.clips.iter().map(|c| c.id)).collect();
         if ids.iter().all(|id| s.grade(*id) == g) {
             return Ok(());
@@ -207,14 +212,21 @@ mod tests {
     }
 
     #[test]
-    fn grade_only_on_video_and_layers() {
+    fn grade_only_on_main_video() {
         let (p, _, _) = proj();
         let t = p.add_track(TrackKind::Text, "T".into());
         let txt = p.append_clip(t, "oi".into(), "".into(), 1000).unwrap();
         assert!(p.set_clip_grade(txt, warm()).is_err());
         let o = p.add_overlay("pip".into(), "p.mp4".into(), 0, 1000).unwrap();
-        p.set_clip_grade(o, warm()).unwrap();
-        assert_eq!(grade_of(&p, o), warm());
+        assert!(p.set_clip_grade(o, warm()).is_err());
+    }
+
+    #[test]
+    fn apply_all_from_neutral_is_refused() {
+        let (p, a, b) = proj();
+        p.set_clip_grade(b, warm()).unwrap();
+        assert!(p.apply_grade_to_all(a).is_err());
+        assert_eq!(grade_of(&p, b), warm());
     }
 
     #[test]

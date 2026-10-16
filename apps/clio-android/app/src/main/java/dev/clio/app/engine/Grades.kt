@@ -45,13 +45,14 @@ object Grades {
         }
 
         companion object {
+            private val SPACES = Regex("\\s+")
             fun parse(text: String): Cube {
                 var n = 0; val vals = ArrayList<Float>()
                 text.lineSequence().forEach { raw ->
                     val l = raw.trim()
                     if (l.isEmpty() || l.startsWith("#") || l.startsWith("TITLE") || l.startsWith("DOMAIN_")) return@forEach
                     if (l.startsWith("LUT_3D_SIZE")) { n = l.substringAfter("LUT_3D_SIZE").trim().toInt(); return@forEach }
-                    l.split(Regex("\\s+")).forEach { vals += it.toFloat() }
+                    l.split(SPACES).forEach { vals += it.toFloat() }
                 }
                 require(n >= 2 && vals.size == n * n * n * 3) { "bad .cube: size $n, ${vals.size} values" }
                 return Cube(n, vals.toFloatArray())
@@ -126,6 +127,10 @@ object Grades {
         b.setPixels(px, 0, b.width, 0, 0, b.width, b.height)
         return b
     }
+
+    @Volatile private var shared: Library? = null
+    /** One process-wide library: the controller, the panels and export share cubes and baked LUTs. */
+    fun library(context: Context): Library = shared ?: synchronized(this) { shared ?: Library(context.applicationContext).also { shared = it } }
 
     /** Loads bundled presets from assets/luts and memoises baked LUTs per grade. */
     class Library(private val context: Context) {

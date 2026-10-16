@@ -25,6 +25,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
@@ -65,13 +66,13 @@ fun FiltersPanel(clip: UiClip?, grade: ColorGrade, onPreview: (ColorGrade?) -> U
     Column(Modifier.fillMaxWidth().height(220.dp).padding(horizontal = Space.md)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("Filtros", style = MaterialTheme.typography.titleMedium, color = ClioColors.TextPrimary, modifier = Modifier.weight(1f))
-            if (clip != null) Choice("Aplicar a todos", false, onClick = onApplyAll)
+            if (clip != null && !Grades.isNeutral(grade)) Choice("Aplicar a todos", false, onClick = onApplyAll)
         }
         if (clip == null) { LookHint(); return@Column }
         var g by remember(clip.id, grade) { mutableStateOf(grade) }
         val haptics = rememberHaptics()
         val ctx = LocalContext.current
-        val lib = remember { Grades.Library(ctx.applicationContext) }
+        val lib = remember { Grades.library(ctx.applicationContext) }
         val thumbs = LocalThumbnails.current
         // No thumbnail source (screenshots, previews): grade a built-in swatch synchronously.
         val still = thumbs == null
@@ -97,7 +98,7 @@ fun FiltersPanel(clip: UiClip?, grade: ColorGrade, onPreview: (ColorGrade?) -> U
         val enabled = g.filter.isNotEmpty()
         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.graphicsLayer { alpha = if (enabled) 1f else 0.4f }) {
             Text("Intensidade", style = MaterialTheme.typography.labelMedium, color = ClioColors.TextSecondary, modifier = Modifier.width(88.dp))
-            Slider(g.intensity, { g = g.copy(intensity = it); onPreview(g) }, Modifier.weight(1f), enabled = enabled,
+            Slider(g.intensity, { g = g.copy(intensity = it); onPreview(g) }, Modifier.weight(1f).semantics { contentDescription = "Intensidade do filtro ${PtBr.pct(g.intensity)}" }, enabled = enabled,
                 onValueChangeFinished = { onCommit(g) }, colors = sliderColors())
             Text(PtBr.pct(g.intensity), style = MaterialTheme.typography.labelSmall, color = ClioColors.TextTertiary, modifier = Modifier.width(44.dp))
         }
@@ -114,7 +115,7 @@ private fun FilterThumb(label: String, base: Bitmap?, id: String, lib: Grades.Li
     }
     val lift by animateFloatAsState(if (selected) 1f else 0f, ClioMotion.snappy(), label = "f")
     Column(horizontalAlignment = Alignment.CenterHorizontally,
-        modifier = Modifier.width(64.dp).semantics { contentDescription = "Filtro $label"; this.selected = selected }.pressable(onClick = onClick)) {
+        modifier = Modifier.width(64.dp).semantics { contentDescription = "Filtro $label"; this.selected = selected; role = androidx.compose.ui.semantics.Role.RadioButton }.pressable(onClick = onClick)) {
         Box(Modifier.size(64.dp, 84.dp).graphicsLayer { scaleX = 1f + 0.06f * lift; scaleY = 1f + 0.06f * lift }
             .clip(ClioShapes.sm).background(ClioColors.SurfaceHigh)
             .border(if (selected) 2.dp else 1.dp, if (selected) ClioColors.Clay else ClioColors.Hairline, ClioShapes.sm)) {
@@ -133,8 +134,7 @@ fun AdjustPanel(clip: UiClip?, grade: ColorGrade, onPreview: (ColorGrade?) -> Un
             Text("Ajustes", style = MaterialTheme.typography.titleMedium, color = ClioColors.TextPrimary, modifier = Modifier.weight(1f))
             if (clip != null) {
                 Choice("Redefinir", false) { onCommit(Grades.NEUTRAL.copy(filter = grade.filter, intensity = grade.intensity)) }
-                Spacer(Modifier.width(Space.sm))
-                Choice("Aplicar a todos", false, onClick = onApplyAll)
+                if (!Grades.isNeutral(grade)) { Spacer(Modifier.width(Space.sm)); Choice("Aplicar a todos", false, onClick = onApplyAll) }
             }
         }
         if (clip == null) { LookHint(); return@Column }

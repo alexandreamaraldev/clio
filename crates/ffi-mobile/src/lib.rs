@@ -148,7 +148,7 @@ struct State {
     /// Styles of text clips by clip id.
     #[serde(default)]
     text_styles: std::collections::BTreeMap<u64, TextStyle>,
-    /// Colour grades of video/layer clips by clip id (phase 4 look).
+    /// Colour grades of main-track video clips by clip id (phase 4 look).
     #[serde(default)]
     grades: std::collections::BTreeMap<u64, ColorGrade>,
     #[serde(skip)]
@@ -245,6 +245,8 @@ pub struct Snapshot {
 }
 
 /// Draft file format version (bump on breaking changes).
+/// Draft schema version. New State fields are `#[serde(default)]` (e.g. `grades`), so they stay at 1;
+/// bump only for breaking changes — older apps then refuse newer drafts instead of mis-reading them.
 const DRAFT_VERSION: u32 = 1;
 
 #[derive(serde::Serialize, serde::Deserialize)]
