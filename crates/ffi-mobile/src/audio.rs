@@ -162,6 +162,10 @@ impl ClioProject {
         if v.detached_to.is_some() {
             return Err(invalid("audio already detached"));
         }
+        // Detached audio would only carry the average speed; curves keep their audio attached (v1).
+        if s.speed_curves.contains_key(&clip_id) {
+            return Err(invalid("remove the speed curve before detaching audio"));
+        }
         let end = end_of(v.start_ms, v.duration_ms)?;
         s.checkpoint();
         let lane = s.free_audio_lane(LANE_DETACHED, v.start_ms, end, u64::MAX);

@@ -146,6 +146,10 @@ interface EditorActions {
     fun move(clipId: Long, toIndex: Int) {}
     fun duplicate(clipId: Long?) {}
     fun setSpeed(clipId: Long?, speed: Float) {}
+    /** Speed curve: a preset id, or null for back to constant speed. */
+    fun setSpeedPreset(clipId: Long?, preset: String?) {}
+    fun setSpeedCurve(clipId: Long?, points: List<Pair<Float, Float>>) {}
+    fun curveSpeedAt(points: List<Pair<Float, Float>>, x: Float): Float = points.firstOrNull()?.second ?: 1f
     fun setAudio(clipId: Long?, volume: Float, fadeInS: Float, fadeOutS: Float, muted: Boolean) {}
     fun setAspect(a: dev.clio.app.engine.Aspect) {}
     fun setFraming(fill: Boolean, blur: Boolean) {}
@@ -253,7 +257,7 @@ fun EditorScreen(
                 TOOL_TEXT -> TextPanel(ui.texts, actions::addText, actions::editText, actions::setTextStyle, actions::retimeText)
                 TOOL_MUSIC -> AudioPanel(ui.music, ui.recording, ui.notice, target != null && target.source != null && !target.detached && ui.tracks.any { t -> t.kind == "video" && target in t.clips },
                     actions::pickMusic, actions::removeMusic, actions::toggleVoiceover, { actions.detachAudio(target?.id) }, actions::addSfx)
-                TOOL_SPEED -> SpeedPanel(target) { actions.setSpeed(target?.id, it) }
+                TOOL_SPEED -> SpeedPanel(target, { actions.setSpeed(target?.id, it) }, { actions.setSpeedPreset(target?.id, it) }, { actions.setSpeedCurve(target?.id, it) }, actions::curveSpeedAt)
                 TOOL_VOLUME -> VolumePanel(target) { v, fi, fo, m -> actions.setAudio(target?.id, v, fi, fo, m) }
                 TOOL_LAYERS -> LayersPanel(ui.layers.firstOrNull { it.id == selectedClip }, actions::addLayer, actions::setLayerTransform) {
                     actions.setLayerTransform(it, UiTransform(0.45f, 0.5f, 0.4f, 0f, 1f))
