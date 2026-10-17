@@ -533,4 +533,36 @@ mod qa_tests {
         for k in (0..history.len() - 1).rev() { assert!(p.undo()); assert_eq!((p.snapshot().speed_curves.first().map(|c| c.curve.clone()), p.tracks()[0].clips[0].duration_ms), history[k]); }
         for k in 1..history.len() { assert!(p.redo()); assert_eq!((p.snapshot().speed_curves.first().map(|c| c.curve.clone()), p.tracks()[0].clips[0].duration_ms), history[k]); }
     }
+
+    /// KNOWN BUG (PR #6, split reshapes curves): `State::sub` rebuilds each half from the original
+    /// points plus interpolated endpoints, so the Hermite tangents change and `curve_segments`
+    /// rescales the result; Herói split at 1/3 plays up to ~12 % off the original speed.
+    /// Strict on purpose (2 %); fails until split keeps the original curve shape.
+    /// After a split each half should still play the original curve: its own plan's speeds must
+    /// match the original curve at the same source position (no reshaping or rescaling).
+    #[test]
+    fn known_bug_split_halves_follow_the_original_curve() {
+        for c in all_curves() {
+            let (p, a) = one_clip(10_000);
+            p.set_speed_curve(a, c.clone()).unwrap();
+            let whole = p.tracks()[0].clips[0].clone();
+            let r = p.split_clip(a, whole.duration_ms / 3).unwrap();
+            let span = 10_000f64;
+            let orig = pts(&c);
+            let mut worst = (0.0f64, String::new());
+            for id in [a, r] {
+                let cl = p.tracks()[0].clips.iter().find(|x| x.id == id).unwrap().clone();
+                let sp = (cl.duration_ms as f64 * cl.speed as f64).round();
+                let off = (cl.in_ms - whole.in_ms) as f64;
+                let cur = p.snapshot().speed_curves.into_iter().find(|x| x.clip_id == id).unwrap().curve;
+                let segs = curve_segments(cur, sp as u64, cl.duration_ms);
+                for (i, s) in segs.iter().enumerate() {
+                    let xs = (off + sp * (i as f64 + 0.5) / segs.len() as f64) / span;
+                    let e = (s.speed as f64 / ref_speed(&orig, xs) - 1.0).abs();
+                    if e > worst.0 { worst = (e, format!("clip {id} seg {i} at source {:.3}: {} vs original {:.4}", xs, s.speed, ref_speed(&orig, xs))); }
+                }
+            }
+            assert!(worst.0 < 0.02, "{}: split reshapes the curve by {:.1}% ({})", c.preset, worst.0 * 100.0, worst.1);
+        }
+    }
 }
