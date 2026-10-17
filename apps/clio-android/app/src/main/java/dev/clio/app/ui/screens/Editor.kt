@@ -216,7 +216,13 @@ fun EditorScreen(
                     .border(1.dp, ClioColors.Hairline, ClioShapes.lg),
             ) {
                 if (ui.blurBg && !ui.fill) BlurBackdrop(ui.tracks.firstOrNull { it.kind == "video" }?.clips.orEmpty(), playhead)
-                preview(ui.fill)
+                // Keyframes / Zoom/Pan of the main clip, on the canvas like export (the clip box clips it).
+                Box(Modifier.matchParentSize().graphicsLayer {
+                    val t = dev.clio.app.engine.Layers.PreviewKeys.transform.value
+                    scaleX = t.scale; scaleY = t.scale
+                    translationX = t.x * size.width / 2; translationY = -t.y * size.height / 2
+                    alpha = t.opacity
+                }) { preview(ui.fill) }
                 LayerStack(ui.layers, playhead, ui.playing, selectedClip, { selectedClip = it; selectedTool = TOOL_LAYERS }, actions::setLayerTransform,
                     canvasW = ui.canvasW, canvasH = ui.canvasH, keyedAt = actions::layerTransformAt)
                 StyledTextLayer(ui.texts, playhead, Modifier.matchParentSize())

@@ -20,7 +20,9 @@ import uniffi.clio_ffi.TrackKind
 import uniffi.clio_ffi.Transition
 import uniffi.clio_ffi.TransitionKind
 import uniffi.clio_ffi.KeyTracks
+import uniffi.clio_ffi.clipLook
 import uniffi.clio_ffi.clipLookKeyed
+import uniffi.clio_ffi.mainKeyedTransform
 import uniffi.clio_ffi.keyedTransform
 
 /**
@@ -46,9 +48,22 @@ object Layers {
     fun hasTransition(main: List<Clip>, index: Int) =
         main[index].transition.kind != TransitionKind.NONE || incoming(main, index).kind != TransitionKind.NONE
 
-    /** The engine's look (keyframes, then transitions): the one evaluation preview and export share. */
-    fun look(c: Clip, incoming: Transition, localMs: Long, keys: KeyTracks? = null): FrameLook =
-        clipLookKeyed(c, keys, incoming, localMs.coerceAtLeast(0).toULong())
+    /** Canvas a main-track clip is framed in (zoom/pan fills it for the clip's aspect). */
+    data class Canvas(val w: Int, val h: Int, val crop: Boolean)
+
+    /** Transitions only (the preview's GL effects). */
+    fun look(c: Clip, incoming: Transition, localMs: Long): FrameLook = clipLook(c, incoming, localMs.coerceAtLeast(0).toULong())
+
+    /** Export: the engine's keyed transform (zoom/pan covered) then transitions. */
+    fun look(c: Clip, incoming: Transition, localMs: Long, keys: KeyTracks?, canvas: Canvas): FrameLook =
+        clipLookKeyed(c, keys, incoming, localMs.coerceAtLeast(0).toULong(), canvas.w.toUInt(), canvas.h.toUInt(), canvas.crop)
+
+    /** Preview: the same keyed transform, drawn on the canvas by Compose (stills never reach the GL chain). */
+    fun mainTransform(c: Clip, keys: KeyTracks, localMs: Long, canvas: Canvas): LayerTransform =
+        mainKeyedTransform(c, keys, localMs.coerceIn(0, c.durationMs.toLong()).toULong(), canvas.w.toUInt(), canvas.h.toUInt(), canvas.crop)
+
+    /** Keyed main-track transform shown by the preview (identity when the clip has no keys). */
+    object PreviewKeys { val transform = androidx.compose.runtime.mutableStateOf(IDENTITY.transform) }
 
     /** A layer's transform at clip-local [localMs] (keyframes over the static transform). */
     fun transformAt(c: Clip, keys: KeyTracks?, localMs: Long): LayerTransform =
@@ -57,8 +72,7 @@ object Layers {
     /** Largest scale a layer reaches (bitmaps are decoded at that size). */
     fun maxScale(c: Clip, keys: KeyTracks?): Float = (keys?.scale?.maxOfOrNull { it.value } ?: 0f).coerceAtLeast(c.transform.scale)
 
-    /** Main-track clip is animated in preview/export when it has a transition or keyframes. */
-    fun animated(main: List<Clip>, index: Int, keys: Map<ULong, KeyTracks>) = hasTransition(main, index) || keys.containsKey(main[index].id)
+
 
     /** NDC matrix for a main-track look (layer x/y are already NDC; rotation ignored on the main track). */
     fun ndcMatrix(t: LayerTransform): Matrix = Matrix().apply {
@@ -104,14 +118,14 @@ object Layers {
         fun reset() { look = IDENTITY }
         val effects = listOf(
             MatrixTransformation { _ -> ndcMatrix(look.transform) },
-            RgbMatrix { _, _ -> brightnessMatrix(mainBrightness(look)) },
+            RgbMatrix { _, _ -> brightnessMatrix(look.brightness) },
         )
     }
 
     /** Export: per-item effects, local time from the first frame the item sees. One FFI call per frame, shared by both effects. */
-    fun exportEffects(c: Clip, incoming: Transition, keys: KeyTracks? = null): List<androidx.media3.common.Effect> {
+    fun exportEffects(c: Clip, incoming: Transition, keys: KeyTracks? = null, canvas: Canvas = Canvas(0, 0, false)): List<androidx.media3.common.Effect> {
         if (keys == null && c.transition.kind == TransitionKind.NONE && incoming.kind == TransitionKind.NONE) return emptyList()
-        val cache = LookCache(c, incoming, keys)
+        val cache = LookCache(c, incoming, keys, canvas)
         return listOf(
             MatrixTransformation { pts -> ndcMatrix(cache.at(pts).transform) },
             RgbMatrix { pts, _ -> brightnessMatrix(mainBrightness(cache.at(pts))) },
@@ -119,12 +133,12 @@ object Layers {
     }
 
     /** Memoises clip_look per presentation time (both GL effects ask for the same frame). */
-    class LookCache(private val c: Clip, private val incoming: Transition, private val keys: KeyTracks? = null) {
+    class LookCache(private val c: Clip, private val incoming: Transition, private val keys: KeyTracks? = null, private val canvas: Canvas = Canvas(0, 0, false)) {
         private val clock = LocalClock()
         private var lastPts = Long.MIN_VALUE
         private var last: FrameLook? = null
         @Synchronized fun at(pts: Long): FrameLook {
-            if (pts != lastPts || last == null) { last = look(c, incoming, clock.ms(pts), keys); lastPts = pts }
+            if (pts != lastPts || last == null) { last = look(c, incoming, clock.ms(pts), keys, canvas); lastPts = pts }
             return last!!
         }
     }

@@ -160,7 +160,7 @@ class Exporter(private val context: Context) {
             if (blur) blurredBackdrop(c, spec.width, spec.height)?.let { video += OverlayEffect(ImmutableList.of(BitmapOverlay.createStaticBitmapOverlay(it))) }
             // Filter + colour adjustments: the same baked LUT effect the preview uses (grades the backdrop too).
             gradeOf[c.id.toLong()]?.let { g -> val plane = gradeLib.plane(g); video += GradeLut { plane } }
-            video += Layers.exportEffects(c, incoming, keysOf[c.id])
+            video += Layers.exportEffects(c, incoming, keysOf[c.id], Layers.Canvas(spec.width, spec.height, snap.fill))
             val overlays = mutableListOf<androidx.media3.effect.TextureOverlay>()
             overlays += layerOverlays
             overlays += StyledTextOverlay(context, c.startMs.toLong(), spec.width, spec.height, 0f) { TextScene.text(texts, it) }

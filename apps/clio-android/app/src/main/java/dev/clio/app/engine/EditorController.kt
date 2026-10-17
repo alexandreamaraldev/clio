@@ -203,6 +203,14 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
         val curves = s.speedCurves.associate { it.clipId to it.curve }
         keyTracks = s.keyframes.associate { it.clipId to it.keys }
         allClips = s.tracks.flatMap { it.clips }.associateBy { it.id.toLong() }
+        // Paused edits: show the keyed main-clip transform at the playhead right away.
+        Layers.mainClips(s).let { main ->
+            val ms = (playheadState.floatValue * 1000).toLong()
+            val c = main.firstOrNull { ms >= it.startMs.toLong() && ms < (it.startMs + it.durationMs).toLong() } ?: main.lastOrNull()
+            val k = c?.let { keyTracks[it.id] }
+            Layers.PreviewKeys.transform.value = if (c == null || k == null) Layers.IDENTITY.transform
+                else Layers.mainTransform(c, k, ms - c.startMs.toLong(), Layers.Canvas(s.summary.width.toInt(), s.summary.height.toInt(), s.fill))
+        }
         speedMaps = s.tracks.flatMap { it.clips }.mapNotNull { c -> curves[c.id]?.let { c.id.toLong() to SpeedMap.of(it, Mix.spanMs(c.durationMs.toLong(), c.speed), c.durationMs.toLong()) } }.toMap()
         val uiTracks = s.tracks.filter { it.clips.isNotEmpty() || it.kind == TrackKind.VIDEO }.map { t ->
             UiTrack(t.name, when (t.kind) { TrackKind.VIDEO -> "video"; TrackKind.AUDIO -> "audio"; TrackKind.TEXT -> "text"; TrackKind.EFFECT -> "fx"; TrackKind.OVERLAY -> "overlay" },
@@ -296,14 +304,17 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
     private fun updateLook(idx: Int, localMs: Long) {
         val c = videoClips.getOrNull(idx) ?: return
         // No FFI call (and no GL effects installed) unless this clip has a transition.
-        if (!Layers.animated(videoClips, idx, keyTracks)) { previewLook.reset(); return }
-        previewLook.look = Layers.look(c, Layers.incoming(videoClips, idx), localMs, keyTracks[c.id])
+        val k = keyTracks[c.id]
+        Layers.PreviewKeys.transform.value = if (k == null) Layers.IDENTITY.transform
+            else Layers.mainTransform(c, k, localMs, Layers.Canvas(ui.canvasW, ui.canvasH, ui.fill))
+        if (!Layers.hasTransition(videoClips, idx)) { previewLook.reset(); return }
+        previewLook.look = Layers.look(c, Layers.incoming(videoClips, idx), localMs)
     }
 
     /** Installs the transition GL effects only while the main track has any transition. */
     private var effectsOn = false to false
     private fun syncPreviewEffects() {
-        val t = videoClips.indices.any { Layers.animated(videoClips, it, keyTracks) }
+        val t = videoClips.indices.any { Layers.hasTransition(videoClips, it) }
         val app = getApplication<Application>()
         // Media3 1.4's LUT shader is SDR-only: with an HDR clip in the playlist the grade is not previewed.
         val vids = videoClips.map { it.source }.filter { !MediaKind.isImage(app, it) }
