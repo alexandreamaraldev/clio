@@ -272,4 +272,64 @@ class SpeedCurveQaE2ETest {
         if (frames.firstOrNull()?.let { isRed(it) } != true) fails += "first frame not red: ${frames.firstOrNull()}"
         assertTrue("flash_in on clip 1 of 2:\n" + fails.joinToString("\n"), fails.isEmpty())
     }
+
+    /**
+     * Three curved clips (Montagem red, Herói green, Flash de entrada blue; muted) over a sine music
+     * lane. Checks, all within one frame (33.3 ms at 30 fps): engine clip durations vs independent
+     * Simpson ∫ (so frame-grid snapping can't drift from the true curve), video/audio ends vs the
+     * engine timeline, each cut (colour change) vs the engine clip start; no pts gap > 1.5 frames;
+     * music audible (RMS) in every 100 ms window across the export.
+     */
+    @Test fun threeCurvedClipsWithMusicStayOnTheFrameGrid() {
+        val frameMs = 1000.0 / 30
+        val plan = listOf(Triple("clio-red.mp4", "montagem", "red"), Triple("clio-green.mp4", "heroi", "green"), Triple("clio-blue.mp4", "flash_in", "blue"))
+        val p = ClioProject("speed-three", 1080u, 1920u)
+        val v = p.addTrack(TrackKind.VIDEO, "V")
+        val spans = mutableListOf<Long>(); val ids = mutableListOf<ULong>()
+        for ((file, preset, _) in plan) {
+            val u = Uri.fromFile(fixture(file)); val span = ExportProbe.info(ctx, u).durationMs
+            val id = p.appendClip(v, file, u.toString(), span.toULong()); p.setClipSourceInfo(id, span.toULong(), 1280u, 720u)
+            p.setSpeedPreset(id, preset); p.setClipAudio(id, 1f, 0u, 0u, true)
+            spans += span; ids += id
+        }
+        val clips = p.tracks()[0].clips
+        val total = p.summary().durationMs.toLong()
+        val music = Uri.fromFile(fixture("clio-music.m4a")).toString()
+        p.setLaneClip(dev.clio.app.engine.AudioLanes.MUSIC, "música", music, 0u, total.toULong())
+        val uri = runBlocking { withTimeout(300_000) { Exporter(ctx).export(p.snapshot(), ExportSpec("speed-three", 720, 1280, 30), CaptionStyle.Clean) {} } }
+        val info = ExportProbe.info(ctx, uri)
+        val frames = scan(uri)
+        val colour = { f: F -> when { f.cr > 170 -> "red"; f.cb > 150 && f.cr < 140 -> "blue"; f.cb < 110 && f.cr < 110 && f.y > 100 -> "green"; else -> "?" } }
+        val fails = mutableListOf<String>()
+        val lines = mutableListOf<String>()
+        plan.forEachIndexed { i, (_, preset, name) ->
+            val c = clips[i]; val want = integralMs(PRESETS.getValue(preset), spans[i].toDouble())
+            val err = c.durationMs.toDouble() - want
+            lines += "$name/$preset: engine start ${c.startMs} dur ${c.durationMs} vs ∫ ${"%.1f".format(want)} (err ${"%.1f".format(err)})"
+            if (abs(err) > frameMs) fails += "$name engine duration ${c.durationMs} vs ∫ ${"%.1f".format(want)} (> 1 frame)"
+            val first = frames.firstOrNull { colour(it) == name }
+            if (first == null) fails += "$name never appears"
+            else {
+                val e = first.ptsUs / 1000.0 - c.startMs.toDouble()
+                lines += "$name first frame ${first.ptsUs / 1000}ms vs start ${c.startMs} (err ${"%.1f".format(e)})"
+                if (abs(e) > frameMs) fails += "$name cut at ${first.ptsUs / 1000}ms vs engine start ${c.startMs} (> 1 frame)"
+            }
+        }
+        val sumInt = plan.indices.sumOf { integralMs(PRESETS.getValue(plan[it].second), spans[it].toDouble()) }
+        lines += "total engine $total, ∑∫ ${"%.1f".format(sumInt)}, video ${info.durationMs}, audio ${info.audioDurationMs}"
+        if (abs(info.durationMs - total) > frameMs) fails += "video end ${info.durationMs} vs engine $total (> 1 frame)"
+        if (!info.hasAudio || abs(info.audioDurationMs - total) > frameMs) fails += "audio end ${info.audioDurationMs} (has=${info.hasAudio}) vs engine $total (> 1 frame)"
+        val unknown = frames.filter { colour(it) == "?" }
+        if (unknown.isNotEmpty()) fails += "${unknown.size} black/foreign frames, e.g. " + unknown.take(5).joinToString { "${it.ptsUs / 1000}ms Y${it.y} Cb${it.cb} Cr${it.cr}" }
+        val gaps = frames.zipWithNext().filter { (x, y) -> y.ptsUs - x.ptsUs > 1.5 * frameMs * 1000 }
+        lines += "frames ${frames.size}, max pts gap ${(frames.zipWithNext { x, y -> y.ptsUs - x.ptsUs }.maxOrNull() ?: 0) / 1000.0}ms"
+        if (gaps.isNotEmpty()) fails += "pts gaps > 1.5 frames: " + gaps.joinToString { "${it.first.ptsUs / 1000}->${it.second.ptsUs / 1000}" }
+        val rms = ExportProbe.audioRms(ctx, uri, 100)
+        val quiet = rms.withIndex().filter { (k, r) -> (k + 1) * 100 <= total - 50 && r < 0.01f }
+        lines += "music rms windows ${rms.size}, min ${"%.4f".format(rms.dropLast(1).minOrNull() ?: 0f)}"
+        if (rms.size < total / 100 - 1) fails += "audio covers only ${rms.size * 100}ms of $total"
+        if (quiet.isNotEmpty()) fails += "silent music windows at " + quiet.take(10).joinToString { "${it.index * 100}ms" }
+        lines.forEach { log("three: $it") }
+        assertTrue("three curved clips + music:\n" + fails.joinToString("\n"), fails.isEmpty())
+    }
 }

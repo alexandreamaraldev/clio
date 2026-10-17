@@ -6,7 +6,7 @@ set -uo pipefail
 APP=$1; TEST=$2; VIDEO=$3; OUT=$4
 PKG=dev.clio.app
 RUNNER=$PKG.test/androidx.test.runner.AndroidJUnitRunner
-TESTS=(EditorE2ETest#fullEditAndExport EditorE2ETest#splitSurvivesRecreateAndReopen ExportMatrixTest#matrix TextCaptionsExportE2ETest#styledTextAndHighlightCaptionsArePainted TextCaptionsExportE2ETest#videoWithAnimatedTextAndKaraokeKeepsStreams ExportLayersBenchTest#bench ExportLayersBenchTest#portraitLayer LayersE2ETest#layerTransformTransitionExport ExportFpsTest#requestedFrameRateIsHonoured AudioMixE2ETest#overlappingLanesExport AudioMixRmsE2ETest#overlappingLanesSoundOnlyInTheirWindows SpeedCurveE2ETest#exportFollowsTheCurve SpeedCurveE2ETest#curvaPanelPresetsAndUndo SpeedCurveQaE2ETest#presetsCustomUndoRedoDraftAndExport SpeedCurveQaE2ETest#flashInOnFirstClipCutIsSeamless)
+TESTS=(EditorE2ETest#fullEditAndExport EditorE2ETest#splitSurvivesRecreateAndReopen ExportMatrixTest#matrix TextCaptionsExportE2ETest#styledTextAndHighlightCaptionsArePainted TextCaptionsExportE2ETest#videoWithAnimatedTextAndKaraokeKeepsStreams ExportLayersBenchTest#bench ExportLayersBenchTest#portraitLayer LayersE2ETest#layerTransformTransitionExport ExportFpsTest#requestedFrameRateIsHonoured AudioMixE2ETest#overlappingLanesExport AudioMixRmsE2ETest#overlappingLanesSoundOnlyInTheirWindows SpeedCurveE2ETest#exportFollowsTheCurve SpeedCurveE2ETest#curvaPanelPresetsAndUndo SpeedCurveQaE2ETest#presetsCustomUndoRedoDraftAndExport SpeedCurveQaE2ETest#flashInOnFirstClipCutIsSeamless SpeedCurveQaE2ETest#threeCurvedClipsWithMusicStayOnTheFrameGrid)
 mkdir -p "$OUT/screens" "$OUT/screenrecord"
 : > "$OUT/results.txt"
 
@@ -32,11 +32,13 @@ adb install -r -g "$APP" && adb install -r -g "$TEST" || { echo "install failed"
 adb push "$VIDEO" /data/local/tmp/clio-test.mp4
 # Solid red / blue 4 s clips (+ tone) for SpeedCurveQaE2ETest's cut check. Generated here, never committed.
 if command -v ffmpeg > /dev/null; then
-  for c in red:0xFF4040 blue:0x4040FF; do
+  for c in red:0xFF4040 green:0x40FF40 blue:0x4040FF; do
     n=${c%%:*}; ffmpeg -y -loglevel error -f lavfi -i color=c=${c#*:}:size=1280x720:rate=30:duration=4 -f lavfi -i sine=frequency=440:sample_rate=44100:duration=4 \
       -c:v libx264 -pix_fmt yuv420p -g 30 -c:a aac -shortest -movflags +faststart "$OUT/clio-$n.mp4" \
       && adb push "$OUT/clio-$n.mp4" /data/local/tmp/clio-$n.mp4 > /dev/null || echo "$n fixture failed" | tee -a "$OUT/results.txt"
   done
+  ffmpeg -y -loglevel error -f lavfi -i sine=frequency=330:sample_rate=44100:duration=40 -c:a aac -b:a 128k "$OUT/clio-music.m4a" \
+    && adb push "$OUT/clio-music.m4a" /data/local/tmp/clio-music.m4a > /dev/null || echo "music fixture failed" | tee -a "$OUT/results.txt"
 else
   echo "ffmpeg missing: no red/blue fixtures" | tee -a "$OUT/results.txt"
 fi
