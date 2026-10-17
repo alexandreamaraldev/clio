@@ -8,6 +8,8 @@ data class UiClip(
     val label: String, val startS: Float, val lenS: Float, val id: Long = label.hashCode().toLong(), val source: String? = null, val inS: Float = 0f,
     val sourceS: Float = 0f, val speed: Float = 1f, val volume: Float = 1f, val fadeInS: Float = 0f, val fadeOutS: Float = 0f, val muted: Boolean = false,
     val detached: Boolean = false,
+    /** Speed curve (preset id or "personalizado") and its points (x 0..1, speed); null = constant speed. */
+    val speedPreset: String? = null, val speedPoints: List<Pair<Float, Float>> = emptyList(),
 )
 data class UiTrack(val name: String, val kind: String, val clips: List<UiClip>)
 
