@@ -109,11 +109,6 @@ class ExportGradeE2ETest {
         return IntArray(3) { (c[it] * 255f + 0.5f).toInt() }
     }
 
-    /**
-     * KNOWN BUG (PR #5, colour range): an ungraded still exports darker (grey 128 -> 115, blue
-     * 50,90,180 -> 33,73,173), i.e. a full/limited range mismatch in the export path. This test is
-     * strict on purpose and fails until the root cause is fixed; do not loosen it.
-     */
     @Test fun everyPresetAndSliderMatchesReference() {
         val n = Grades.NEUTRAL
         val cases = listOf("neutral" to n) +
