@@ -22,10 +22,7 @@
 - Prévia: com algum clipe HDR na playlist o efeito de LUT não é instalado; aparece o aviso
   "Vídeo HDR: filtros e ajustes não aparecem na prévia…".
 - Follow-up: LUT em espaço linear/PQ (shader próprio) para manter HDR com grade.
-- Cobertura de teste: o emulador do CI (API 34) não decodifica HEVC 10-bit HLG, então
-  `ExportGradeE2ETest#hdrSourcesExportWithGrades` só exercita o caminho do erro em pt-BR (`export_error`).
-  Uma exportação HDR de verdade (clipe HLG com grade, e SDR com grade + HLG sem grade) ainda precisa ser
-  verificada num aparelho físico.
+- Cobertura de teste: `ExportGradeE2ETest#hdrSourcesExportWithGrades` (HLG com grade; SDR com grade + HLG) só cobre o erro `export_error` no CI; ver o follow-up acima.
 
 ## Banding em 8 bits
 - O LUT é um cubo 33³ RGBA8 (os .cube de origem são 17³, reamostrados) com interpolação trilinear, aplicado a frames de 8 bits. Gradientes suaves (céu, parede)
