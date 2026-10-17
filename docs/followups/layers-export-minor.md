@@ -6,3 +6,4 @@
 - **EXIF on image layers:** `BitmapFactory` ignores the orientation tag, so rotated phone photos come out sideways. Apply `ExifInterface` orientation in `decodeStill`, and use it for the aspect in `plan`.
 - **Bench:** add a VFR phone clip and a 60 fps clip to `ExportLayersBenchTest` (decodes per frame, wall time, output fps).
 - **HDR / 10-bit layers:** `SequentialVideoDecoder` assumes 8-bit YUV 4:2:0 output (`COLOR_FormatYUV420Flexible`). 10-bit HLG/PQ phone footage (P010) is either rejected or converted with the wrong range and transfer, and the export is SDR. Detect `KEY_COLOR_TRANSFER`/P010 and tone-map to SDR (or decode on the GPU with Media3's HDR path), and add a 10-bit clip to the bench.
+- **HDR + grades:** graded HLG/PQ clips are tone-mapped to SDR on export (API 29+) or exported ungraded with a notice; see `look-grades.md`.

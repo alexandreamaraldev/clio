@@ -85,6 +85,51 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
 
     /** Main-track transition look for the preview (see Layers.PreviewLook). */
     private val previewLook = Layers.PreviewLook()
+    /** Filter/colour grade of the clip under the playhead: one baked LUT, same effect as export. */
+    private val gradeLib by lazy { Grades.library(app) }
+    /** Player position in playlist source µs (see GradeSchedule), updated on the UI tick and seeks. */
+    @Volatile private var approxPlaylistUs = 0L
+    private val gradeSchedule = GradeSchedule { approxPlaylistUs }
+    private val previewGrade = GradeLut { pts -> gradeSchedule.planeAt(pts, gradeLib.identity) }
+    private var grades: Map<Long, uniffi.clio_ffi.ColorGrade> = emptyMap()
+    /** Live slider/strip value for one clip, before it is committed to the engine. */
+    @Volatile private var gradeDraft: Pair<Long, uniffi.clio_ffi.ColorGrade>? = null
+    /** Bake requests: conflated, baked on Dispatchers.Default, latest wins. */
+    private val bakeRequests = MutableSharedFlow<Unit>(extraBufferCapacity = 1, onBufferOverflow = kotlinx.coroutines.channels.BufferOverflow.DROP_OLDEST)
+    private var lastRedrawMs = 0L
+    private var hdrInPlaylist = false
+    private var lastPlanKey: Any? = null
+    private fun vids(): List<String> { val app = getApplication<Application>(); return videoClips.map { it.source }.filter { !MediaKind.isImage(app, it) } }
+    private val bakeJob = viewModelScope.launch {
+        bakeRequests.collect {
+            val clips = videoClips; val gs = grades; val draft = gradeDraft
+            val app = getApplication<Application>()
+            // Only re-bake/redraw when the per-item plan (source spans + resolved grades) changed;
+            // planes themselves are cached per grade in the shared Grades.Library.
+            val key = clips.map { c -> Triple(c.source, Mix.spanMs(c.durationMs.toLong(), c.speed) to c.durationMs, draft?.takeIf { it.first == c.id.toLong() }?.second ?: gs[c.id.toLong()]) }
+            if (key == lastPlanKey) return@collect
+            lastPlanKey = key
+            val plan = withContext(Dispatchers.Default) {
+                var at = 0L
+                val starts = LongArray(clips.size); val planes = Array(clips.size) { i ->
+                    val c = clips[i]
+                    starts[i] = at
+                    at += 1000 * (if (MediaKind.isImage(app, c.source)) c.durationMs.toLong() else Mix.spanMs(c.durationMs.toLong(), c.speed))
+                    val g = draft?.takeIf { it.first == c.id.toLong() }?.second ?: gs[c.id.toLong()]
+                    if (g == null) gradeLib.identity else gradeLib.plane(g)
+                }
+                starts to planes
+            }
+            gradeSchedule.publish(plan.first, plan.second)
+            // Throttled redraw of the paused frame (at most every 80 ms; the last request always lands).
+            if (!player.isPlaying && clips.isNotEmpty()) {
+                val wait = 80 - (android.os.SystemClock.uptimeMillis() - lastRedrawMs)
+                if (wait > 0) delay(wait)
+                lastRedrawMs = android.os.SystemClock.uptimeMillis()
+                seekTimeline(playheadState.floatValue)
+            }
+        }
+    }
     /** Next picker result goes to an overlay layer instead of the main track. */
     private var pickForLayer = false
     val player: ExoPlayer = ExoPlayer.Builder(app).build().apply {
@@ -153,6 +198,8 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
             texts = s.tracks.filter { it.kind == TrackKind.TEXT }.flatMap { it.clips }.map { c -> TextItem(c.id.toLong(), c.name, c.startMs.toLong(), (c.startMs + c.durationMs).toLong(), s.textStyles.firstOrNull { it.clipId == c.id }?.style ?: StyledText.defaultStyle) },
             music = s.tracks.firstOrNull { it.kind == TrackKind.AUDIO && it.name == AudioLanes.MUSIC }?.clips?.firstOrNull()?.name,
             layers = LayersMapping.layers(getApplication(), s), cuts = LayersMapping.cuts(s))
+        grades = Grades.byClip(s.grades)
+        ui = ui.copy(grades = grades)
         Waveforms.request(getApplication(), audio.clipsOf(s))
         lastSnap = s
         if (rebuildPlayer) rebuildPlaylist(s) else refreshClipCache(s)
@@ -183,6 +230,7 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
         val c = videoClips.getOrNull(idx)
         val local = (player.currentPosition / (c?.speed ?: 1f)).toLong()
         playheadState.floatValue = (clipStarts.getOrElse(idx) { 0L } + local) / 1000f
+        approxPlaylistUs = playlistUs(idx, player.currentPosition)
         updateLook(idx, local)
         if (c != null) player.volume = AudioGain.preview(AudioGain.at(c, local))
         if (voice.isRecording) player.volume = 0f // no speaker bleed into the mic
@@ -204,13 +252,37 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
     }
 
     /** Installs the transition GL effects only while the main track has any transition. */
-    private var effectsOn = false
+    private var effectsOn = false to false
     private fun syncPreviewEffects() {
-        val want = videoClips.indices.any { Layers.hasTransition(videoClips, it) }
-        if (want == effectsOn) return
-        effectsOn = want
+        val t = videoClips.indices.any { Layers.hasTransition(videoClips, it) }
+        val app = getApplication<Application>()
+        // Media3 1.4's LUT shader is SDR-only: with an HDR clip in the playlist the grade is not previewed.
+        val vids = videoClips.map { it.source }.filter { !MediaKind.isImage(app, it) }
+        // Not probed yet counts as HDR, so the SDR-only LUT never runs on an HDR source.
+        hdrInPlaylist = vids.any { HdrProbe.cached(it) != false }
+        // Unknown URIs are probed in the background, then the effects are re-synced.
+        if (vids.any { HdrProbe.cached(it) == null }) viewModelScope.launch { if (HdrProbe.prefetch(app, vids)) redrawPaused() }
+        val g = !hdrInPlaylist && (gradeDraft != null || videoClips.any { grades.containsKey(it.id.toLong()) })
+        bakeRequests.tryEmit(Unit)
+        if ((t to g) == effectsOn) return
+        effectsOn = t to g
         previewLook.reset()
-        player.setVideoEffects(if (want) previewLook.effects else emptyList())
+        // Colour first (the LUT), then the transition transform/fade, as in export.
+        player.setVideoEffects((if (g) listOf<androidx.media3.common.Effect>(previewGrade) else emptyList()) + (if (t) previewLook.effects else emptyList()))
+    }
+
+    /** Re-bakes (off the main thread) and re-renders the paused frame so a new grade shows. */
+    private fun redrawPaused() {
+        syncPreviewEffects()
+        if (vids().any { HdrProbe.cached(it) == true } && (gradeDraft != null || grades.isNotEmpty())) ui = ui.copy(notice = HdrProbe.PREVIEW_NOTICE)
+    }
+
+    /** Playlist source µs of item [idx] at source offset [srcMs] (what GradeSchedule counts in). */
+    private fun playlistUs(idx: Int, srcMs: Long): Long {
+        val app = getApplication<Application>()
+        var at = 0L
+        for (i in 0 until idx.coerceAtMost(videoClips.size)) { val c = videoClips[i]; at += if (MediaKind.isImage(app, c.source)) c.durationMs.toLong() else Mix.spanMs(c.durationMs.toLong(), c.speed) }
+        return (at + srcMs) * 1000
     }
 
     /** The media picker was dismissed without a choice. */
@@ -219,7 +291,11 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
     private fun seekTimeline(s: Float) {
         val ms = (s * 1000).toLong()
         val idx = clipStarts.indexOfLast { it <= ms }.coerceAtLeast(0)
-        if (clipStarts.isNotEmpty()) player.seekTo(idx, Mix.spanMs(ms - clipStarts[idx], videoClips.getOrNull(idx)?.speed ?: 1f))
+        if (clipStarts.isNotEmpty()) {
+            val src = Mix.spanMs(ms - clipStarts[idx], videoClips.getOrNull(idx)?.speed ?: 1f)
+            approxPlaylistUs = playlistUs(idx, src); gradeSchedule.seeked(approxPlaylistUs)
+            player.seekTo(idx, src)
+        }
         applyItemParams()
         playheadState.floatValue = s
         if (clipStarts.isNotEmpty()) updateLook(idx, ms - clipStarts[idx])
@@ -285,10 +361,13 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
         exportJob = viewModelScope.launch {
             exportState = ExportState.Running(0f, spec.label)
             exportState = try {
-                ExportState.Done(exporter.export(snap, spec, style) { p -> exportState = ExportState.Running(p, spec.label) })
+                ExportState.Done(exporter.export(snap, spec, style) { p -> exportState = ExportState.Running(p, spec.label) }).also { exporter.lastNotice?.let { n -> ui = ui.copy(notice = n) } }
             } catch (e: CancellationException) { throw e } catch (e: Throwable) {
                 android.util.Log.e("ClioExport", "export failed", e)
-                ExportState.Failed(generateSequence(e) { it.cause }.take(4).joinToString(" ← ") { it.message ?: it.javaClass.simpleName })
+                // The screen shows one pt-BR sentence; the raw cause chain (GL, codec dumps) is only in the log above.
+                ExportState.Failed(generateSequence<Throwable>(e) { it.cause }.filterIsInstance<UserFacingExportError>().firstOrNull()?.message
+                    ?: (e as? IllegalArgumentException)?.message
+                    ?: "Não foi possível exportar o vídeo. Tente novamente.")
             }
         }
     }
@@ -400,6 +479,21 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
         launchEdit { runCatching { setClipTransform(clipId.toULong(), LayersMapping.transform(t)) } }.let { }
     override fun setTransition(clipId: Long, style: TransitionStyle, durS: Float) = launchEdit(rebuildPlayer = false) {
         runCatching { setTransition(clipId.toULong(), LayersMapping.kind(style), (durS * 1000).toLong().coerceAtLeast(0).toULong()) }
+    }.let { }
+    override fun previewGrade(clipId: Long, grade: uniffi.clio_ffi.ColorGrade?) {
+        gradeDraft = grade?.let { clipId to it }
+        redrawPaused()
+    }
+    override fun setGrade(clipId: Long, grade: uniffi.clio_ffi.ColorGrade) = viewModelScope.launch {
+        val committing = gradeDraft
+        apply(edit { runCatching { setClipGrade(clipId.toULong(), grade) } }, rebuildPlayer = false)
+        // Only drop the draft we committed; a newer drag that started meanwhile stays live.
+        if (gradeDraft === committing) gradeDraft = null
+        redrawPaused()
+    }.let { }
+    override fun applyGradeToAll(clipId: Long) = viewModelScope.launch {
+        apply(edit { runCatching { applyGradeToAll(clipId.toULong()) } }, rebuildPlayer = false)
+        redrawPaused()
     }.let { }
     override fun undo() = launchEdit(rebuildPlayer = true) { undo() }.let { }
     override fun redo() = launchEdit(rebuildPlayer = true) { redo() }.let { }

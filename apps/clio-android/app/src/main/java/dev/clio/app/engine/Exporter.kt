@@ -49,11 +49,18 @@ data class ExportSpec(val label: String, val width: Int, val height: Int, val fp
  */
 @OptIn(UnstableApi::class)
 class Exporter(private val context: Context) {
+    private val gradeLib by lazy { Grades.library(context) }
     /** Diagnostics toggle used by the device QA export matrix. */
     internal var frameDrop = true
 
     /** Layer decode counters from the last export (bench/QA diagnostics). */
     data class LayerStats(val decodedFrames: Int, val requestedFrames: Int)
+    /** HDR handling for one attempt: GPU tone-map, MediaCodec tone-map, or drop the grades. */
+    private enum class HdrPlan { CODEC, GL, AS_SDR, DROP }
+    private var hdrPlan = HdrPlan.GL
+    private var toneMap = false
+    /** pt-BR notice about the last export (e.g. HDR grade skipped), or null. */
+    @Volatile var lastNotice: String? = null; private set
     @Volatile internal var lastLayerStats = LayerStats(0, 0); private set
 
     companion object {
@@ -66,8 +73,28 @@ class Exporter(private val context: Context) {
         // Layer frame sources live for exactly one export (Exporter instances may be shared).
         val sources = mutableListOf<Layers.FrameSource>()
         try {
-            val composition = buildComposition(snap, spec, captionStyle, sources)
-            withContext(Dispatchers.Main) { run(composition, out, onProgress) }
+            // Probe HDR off the main thread before building (MediaExtractor per new URI, cached).
+            val videoSources = snap.tracks.firstOrNull { it.kind == TrackKind.VIDEO }?.clips.orEmpty().map { it.source }.filter { !MediaKind.isImage(context, it) }
+            HdrProbe.prefetch(context, videoSources)
+            // HDR + grades: MediaCodec tone-mapping (API 31+) first, then GPU tone-mapping (needs
+            // GL_EXT_YUV_target, missing on some GPUs/emulators), then reading HDR as SDR (keeps grades,
+            // flatter colours), then exporting without grades. Each failure retries automatically.
+            // Ungraded HDR projects keep HDR (one attempt, no tone-map).
+            val anyHdr = videoSources.any { HdrProbe.cached(it) == true }
+            val plans = if (!anyHdr || snap.grades.isEmpty()) listOf(HdrPlan.DROP)
+                else buildList { if (Build.VERSION.SDK_INT >= 31) add(HdrPlan.CODEC); if (Build.VERSION.SDK_INT >= 29) { add(HdrPlan.GL); add(HdrPlan.AS_SDR) }; add(HdrPlan.DROP) }
+            for ((k, plan) in plans.withIndex()) {
+                hdrPlan = plan
+                sources.forEach { it.close() }; sources.clear()
+                val composition = buildComposition(snap, spec, captionStyle, sources)
+                try { withContext(Dispatchers.Main) { run(composition, out, onProgress) }; break }
+                catch (e: ExportException) {
+                    if (!anyHdr) throw e
+                    // The last stage already exports without grades: say the device can't do this HDR video.
+                    if (k == plans.lastIndex) throw UserFacingExportError("Este aparelho não consegue exportar este vídeo HDR.", e)
+                    android.util.Log.w("Clio", "HDR tone-map ($plan) failed, trying ${plans[k + 1]}", e)
+                }
+            }
             lastLayerStats = LayerStats(sources.sumOf { it.decodes }, sources.sumOf { it.requests })
             sources.firstNotNullOfOrNull { it.error }?.let { throw IllegalStateException(it) }
         } finally { sources.forEach { it.close() } }
@@ -81,6 +108,21 @@ class Exporter(private val context: Context) {
             StyledTextItem(c.name, c.startMs.toLong(), (c.startMs + c.durationMs).toLong(), snap.textStyles.firstOrNull { it.clipId == c.id }?.style ?: StyledText.defaultStyle)
         }
         val caps = snap.captions
+        // Media3 1.4's LUT shader is SDR-only (checkArgument(!useHdr)), and one HDR clip makes the whole
+        // sequence's pipeline HDR. So with ANY HDR clip and any grade the export is tone-mapped to SDR on
+        // the GPU (API 29+); below that all grades are dropped for this export and [lastNotice] says so.
+        val graded = Grades.byClip(snap.grades)
+        val anyHdr = video.any { !MediaKind.isImage(context, it.source) && HdrProbe.cached(it.source) == true }
+        // Any HDR clip: convert the whole export to SDR (matches the SDR preview), grades or not.
+        // Tone-map only when grades meet HDR (Media3's LUT is SDR-only); ungraded HDR stays HDR.
+        toneMap = anyHdr && graded.isNotEmpty() && hdrPlan != HdrPlan.DROP
+        val dropGrades = anyHdr && graded.isNotEmpty() && !toneMap
+        lastNotice = when {
+            dropGrades -> "Vídeo HDR: os filtros foram ignorados nesta exportação (este aparelho não converte HDR para SDR)."
+            toneMap && hdrPlan == HdrPlan.AS_SDR -> "Vídeo HDR: este aparelho não converte HDR; as cores do trecho HDR podem ficar lavadas."
+            else -> null
+        }
+        val gradeOf = if (dropGrades) emptyMap() else graded
         val totalMs = snap.summary.durationMs.toLong()
         val blur = snap.blurBg && !snap.fill
 
@@ -110,6 +152,8 @@ class Exporter(private val context: Context) {
             // (Media3 1.4's GaussianBlurWithFrameOverlaid produced wrong output sizes / stalled on device QA.)
             // It is part of the clip: applied before the transition effects so Slide/Zoom move clip + backdrop together.
             if (blur) blurredBackdrop(c, spec.width, spec.height)?.let { video += OverlayEffect(ImmutableList.of(BitmapOverlay.createStaticBitmapOverlay(it))) }
+            // Filter + colour adjustments: the same baked LUT effect the preview uses (grades the backdrop too).
+            gradeOf[c.id.toLong()]?.let { g -> val plane = gradeLib.plane(g); video += GradeLut { plane } }
             video += Layers.exportEffects(c, incoming)
             val overlays = mutableListOf<androidx.media3.effect.TextureOverlay>()
             overlays += layerOverlays
@@ -124,6 +168,11 @@ class Exporter(private val context: Context) {
         val seqs = mutableListOf(EditedMediaItemSequence(items))
         seqs += AudioExport.sequences(context, snap, totalMs, chain = ::audioChain)
         return Composition.Builder(seqs).experimentalSetForceAudioTrack(true)
+            .apply { if (toneMap) setHdrMode(when (hdrPlan) {
+                HdrPlan.CODEC -> Composition.HDR_MODE_TONE_MAP_HDR_TO_SDR_USING_MEDIACODEC
+                HdrPlan.AS_SDR -> Composition.HDR_MODE_EXPERIMENTAL_FORCE_INTERPRET_HDR_AS_SDR
+                else -> Composition.HDR_MODE_TONE_MAP_HDR_TO_SDR_USING_OPEN_GL
+            }) }
             .setEffects(Effects(listOf(LimiterProcessor()), emptyList())).build()
     }
 
@@ -139,6 +188,10 @@ class Exporter(private val context: Context) {
         try {
             suspendCancellableCoroutine { cont ->
                 transformer = Transformer.Builder(context)
+                    // Keep SDR inputs in their own colour space. The DEFAULT working space converts sRGB
+                    // stills to SMPTE 170M (smpte170mOetf(srgbEotf(x))), so grey 128 encoded as 115.
+                    .setVideoFrameProcessorFactory(androidx.media3.effect.DefaultVideoFrameProcessor.Factory.Builder()
+                        .setSdrWorkingColorSpace(androidx.media3.effect.DefaultVideoFrameProcessor.WORKING_COLOR_SPACE_ORIGINAL).build())
                     .setVideoMimeType(MimeTypes.VIDEO_H264)
                     .setAudioMimeType(MimeTypes.AUDIO_AAC)
                     // Heavy effect chains (blur, 4K) on slow devices can legitimately exceed the 10 s default.
@@ -244,3 +297,6 @@ object MediaKind {
         runCatching { context.contentResolver.getType(Uri.parse(source)) }.getOrNull()?.startsWith("image/")
             ?: source.substringAfterLast('.').lowercase().let { it in setOf("jpg", "jpeg", "png", "webp", "heic") }
 }
+
+/** An export failure whose message is already a complete pt-BR sentence for the user (no cause chain). */
+class UserFacingExportError(message: String, cause: Throwable?) : Exception(message, cause)
