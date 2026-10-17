@@ -143,6 +143,14 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
     private fun launchEdit(rebuildPlayer: Boolean = false, block: ClioProject.() -> Unit) =
         viewModelScope.launch { apply(edit(block = block), rebuildPlayer) }
 
+    /** Points of a (possibly windowed, after split/trim) curve in the clip's own 0..1 range, for the editor. */
+    private fun visiblePoints(c: uniffi.clio_ffi.SpeedCurve): List<Pair<Float, Float>> {
+        if (c.from == 0f && c.to == 1f) return c.points.map { it.x to it.speed }
+        val w = c.to - c.from
+        val inner = c.points.filter { it.x > c.from + 0.01f * w && it.x < c.to - 0.01f * w }.map { (it.x - c.from) / w to it.speed }
+        return (listOf(0f to uniffi.clio_ffi.curveSpeedAt(c, 0f)) + inner + (1f to uniffi.clio_ffi.curveSpeedAt(c, 1f))).take(12)
+    }
+
     private fun apply(s: Snapshot, rebuildPlayer: Boolean) {
         val curves = s.speedCurves.associate { it.clipId to it.curve }
         speedMaps = s.tracks.flatMap { it.clips }.mapNotNull { c -> curves[c.id]?.let { c.id.toLong() to SpeedMap.of(it, Mix.spanMs(c.durationMs.toLong(), c.speed), c.durationMs.toLong()) } }.toMap()
@@ -150,7 +158,7 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
             UiTrack(t.name, when (t.kind) { TrackKind.VIDEO -> "video"; TrackKind.AUDIO -> "audio"; TrackKind.TEXT -> "text"; TrackKind.EFFECT -> "fx"; TrackKind.OVERLAY -> "overlay" },
                 t.clips.map { c -> UiClip(c.name, c.startMs.toFloat() / 1000f, c.durationMs.toFloat() / 1000f, c.id.toLong(), c.source, c.inMs.toFloat() / 1000f,
                     c.sourceMs.toFloat() / 1000f, c.speed, c.volume, c.fadeInMs.toFloat() / 1000f, c.fadeOutMs.toFloat() / 1000f, c.muted, detached = c.detachedTo != null,
-                    speedPreset = curves[c.id]?.preset, speedPoints = curves[c.id]?.points?.map { it.x to it.speed }.orEmpty()) })
+                    speedPreset = curves[c.id]?.preset, speedPoints = curves[c.id]?.let(::visiblePoints).orEmpty()) })
         }
         val caps = s.captions.map { Engine.Cap(it.startMs.toLong(), it.endMs.toLong(), it.text, it.words) }
         val withCaps = if (caps.isEmpty()) uiTracks else uiTracks + UiTrack("Legendas", "text",

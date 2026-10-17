@@ -23,7 +23,16 @@ pub struct SpeedCurve {
     /// Preset id from [`speed_presets`], or "personalizado".
     pub preset: String,
     pub points: Vec<SpeedPoint>,
+    /// Window of the curve played by this clip (0..1 of the point range): a split/trim keeps the
+    /// original points and narrows the window, so each part plays exactly the original shape.
+    #[serde(default)]
+    #[uniffi(default = 0.0)]
+    pub from: f32,
+    #[serde(default = "one")]
+    #[uniffi(default = 1.0)]
+    pub to: f32,
 }
+fn one() -> f32 { 1.0 }
 
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
 pub struct ClipSpeedCurve {
@@ -62,7 +71,7 @@ const PRESETS: &[(&str, &str, &[(f32, f32)])] = &[
 ];
 
 fn curve_of(id: &str, pts: &[(f32, f32)]) -> SpeedCurve {
-    SpeedCurve { preset: id.into(), points: pts.iter().map(|&(x, speed)| SpeedPoint { x, speed }).collect() }
+    SpeedCurve { preset: id.into(), points: pts.iter().map(|&(x, speed)| SpeedPoint { x, speed }).collect(), from: 0.0, to: 1.0 }
 }
 
 /// Built-in ramps (pt-BR labels), in chip order. "Personalizado" is any edited curve.
@@ -85,13 +94,16 @@ impl SpeedCurve {
         p.first_mut().unwrap().x = 0.0;
         p.last_mut().unwrap().x = 1.0;
         let preset = if PRESETS.iter().any(|(id, ..)| *id == self.preset) { self.preset.clone() } else { CUSTOM.into() };
-        Ok(SpeedCurve { preset, points: p })
+        // Window: finite, ordered, at least 1 % wide (may run past the points on trims; ends then hold).
+        let (mut from, mut to) = (if self.from.is_finite() { self.from.clamp(-1.0, 2.0) } else { 0.0 }, if self.to.is_finite() { self.to.clamp(-1.0, 2.0) } else { 1.0 });
+        if to - from < 0.01 { from = 0.0; to = 1.0; }
+        Ok(SpeedCurve { preset, points: p, from, to })
     }
 
     /// Speed at source position `x` (0..1): monotone cubic (Fritsch–Carlson) in log2(speed).
     pub fn speed_at(&self, x: f32) -> f32 {
         let p = &self.points;
-        let x = x.clamp(0.0, 1.0);
+        let x = (self.from + x.clamp(0.0, 1.0) * (self.to - self.from)).clamp(0.0, 1.0);
         let i = p.windows(2).position(|w| x <= w[1].x).unwrap_or(p.len() - 2);
         let y: Vec<f32> = p.iter().map(|q| q.speed.log2()).collect();
         let d: Vec<f32> = p.windows(2).zip(y.windows(2)).map(|(w, v)| (v[1] - v[0]) / (w[1].x - w[0].x).max(1e-6)).collect();
@@ -117,13 +129,9 @@ impl SpeedCurve {
 
     /// The part of this curve between source positions `a` and `b`, renormalised to 0..1.
     fn sub(&self, a: f32, b: f32) -> SpeedCurve {
-        let w = (b - a).max(1e-6);
-        let mut pts = vec![SpeedPoint { x: 0.0, speed: self.speed_at(a) }];
-        pts.extend(self.points.iter().filter(|p| p.x > a + 1e-3 && p.x < b - 1e-3).map(|p| SpeedPoint { x: (p.x - a) / w, speed: p.speed }));
-        pts.push(SpeedPoint { x: 1.0, speed: self.speed_at(b) });
-        pts.truncate(MAX_CURVE_POINTS);
-        pts.last_mut().unwrap().x = 1.0;
-        SpeedCurve { preset: CUSTOM.into(), points: pts }
+        // Same points, narrower window: the part plays exactly the original shape.
+        let w = self.to - self.from;
+        SpeedCurve { preset: self.preset.clone(), points: self.points.clone(), from: self.from + a * w, to: self.from + b * w }
     }
 }
 
@@ -329,7 +337,7 @@ mod tests {
 
     #[test]
     fn ramps_stay_between_neighbours() {
-        let c = SpeedCurve { preset: CUSTOM.into(), points: vec![SpeedPoint { x: 0.0, speed: 1.0 }, SpeedPoint { x: 0.5, speed: 4.0 }, SpeedPoint { x: 1.0, speed: 0.5 }] };
+        let c = SpeedCurve { preset: CUSTOM.into(), points: vec![SpeedPoint { x: 0.0, speed: 1.0 }, SpeedPoint { x: 0.5, speed: 4.0 }, SpeedPoint { x: 1.0, speed: 0.5 }], from: 0.0, to: 1.0 };
         let mut last = 0.0;
         for i in 0..=50 {
             let v = curve_speed_at(c.clone(), i as f32 / 100.0);
@@ -385,7 +393,7 @@ mod tests {
         let t = clip(&p, a);
         let q = { let (q, qa, _) = proj(); q.set_speed_preset(qa, "bala".into()).unwrap(); q.split_clip(qa, c.duration_ms / 2).unwrap(); (clip(&q, qa), curve(&q, qa).unwrap()) };
         assert!((t.duration_ms as i64 - q.0.duration_ms as i64).abs() <= 2, "{} vs {}", t.duration_ms, q.0.duration_ms);
-        assert!(curve(&p, a).unwrap().points.last().unwrap().speed < 0.3, "ends in the slow part, not re-stretched");
+        assert!(curve(&p, a).unwrap().speed_at(1.0) < 0.3, "ends in the slow part, not re-stretched");
         assert_eq!(curve(&p, a).unwrap().points.len(), q.1.points.len());
         // Left trim: source end kept, in-point moves.
         let end = t.in_ms + (t.duration_ms as f64 * t.speed as f64).round() as u64;
@@ -398,7 +406,7 @@ mod tests {
 
     #[test]
     fn steep_and_long_ramps_get_more_segments() {
-        let flat = SpeedCurve { preset: CUSTOM.into(), points: vec![SpeedPoint { x: 0.0, speed: 1.0 }, SpeedPoint { x: 1.0, speed: 1.0 }] };
+        let flat = SpeedCurve { preset: CUSTOM.into(), points: vec![SpeedPoint { x: 0.0, speed: 1.0 }, SpeedPoint { x: 1.0, speed: 1.0 }], from: 0.0, to: 1.0 };
         assert_eq!(curve_segments(flat.clone(), 3000, 3000).len(), CURVE_SEGMENTS);
         assert_eq!(curve_segments(flat, 60_000, 60_000).len(), 600.min(MAX_CURVE_SEGMENTS));
         let bala = speed_presets().into_iter().find(|p| p.id == "bala").unwrap().curve;
@@ -443,8 +451,8 @@ mod tests {
         // Bala is symmetric, so the middle of the timeline is the middle of the source.
         assert!((lspan as i64 - (span / 2) as i64).abs() < (span / 20) as i64, "{lspan} vs {span}");
         // Left half ends slow, right half starts slow.
-        assert!(curve(&p, a).unwrap().points.last().unwrap().speed < 0.3);
-        assert!(curve(&p, r).unwrap().points.first().unwrap().speed < 0.3);
+        assert!(curve(&p, a).unwrap().speed_at(1.0) < 0.3);
+        assert!(curve(&p, r).unwrap().speed_at(0.0) < 0.3);
     }
 
     #[test]
@@ -478,12 +486,12 @@ mod tests {
     #[test]
     fn sanitize_and_kinds() {
         let (p, a, _) = proj();
-        let junk = SpeedCurve { preset: "x".into(), points: vec![SpeedPoint { x: 0.7, speed: 99.0 }, SpeedPoint { x: f32::NAN, speed: 1.0 }, SpeedPoint { x: 0.2, speed: 0.0 }] };
+        let junk = SpeedCurve { preset: "x".into(), points: vec![SpeedPoint { x: 0.7, speed: 99.0 }, SpeedPoint { x: f32::NAN, speed: 1.0 }, SpeedPoint { x: 0.2, speed: 0.0 }], from: 0.0, to: 1.0 };
         p.set_speed_curve(a, junk).unwrap();
         let c = curve(&p, a).unwrap();
         assert_eq!(c.preset, CUSTOM);
         assert_eq!(c.points, vec![SpeedPoint { x: 0.0, speed: MIN_SPEED }, SpeedPoint { x: 1.0, speed: MAX_SPEED }]);
-        let one = SpeedCurve { preset: CUSTOM.into(), points: vec![SpeedPoint { x: 0.5, speed: 1.0 }] };
+        let one = SpeedCurve { preset: CUSTOM.into(), points: vec![SpeedPoint { x: 0.5, speed: 1.0 }], from: 0.0, to: 1.0 };
         assert!(p.set_speed_curve(a, one).is_err());
         let t = p.add_track(TrackKind::Text, "T".into());
         let txt = p.append_clip(t, "oi".into(), "".into(), 1000).unwrap();
@@ -526,7 +534,7 @@ mod qa_tests {
     fn custom() -> SpeedCurve {
         SpeedCurve { preset: CUSTOM.into(), points: vec![
             SpeedPoint { x: 0.0, speed: 0.4 }, SpeedPoint { x: 0.2, speed: 3.0 }, SpeedPoint { x: 0.5, speed: 0.25 },
-            SpeedPoint { x: 0.8, speed: 6.0 }, SpeedPoint { x: 1.0, speed: 1.0 }] }
+            SpeedPoint { x: 0.8, speed: 6.0 }, SpeedPoint { x: 1.0, speed: 1.0 }], from: 0.0, to: 1.0 }
     }
 
     fn all_curves() -> Vec<SpeedCurve> {
@@ -627,8 +635,7 @@ mod qa_tests {
     /// After a split each half should still play the original curve: its own plan's speeds must
     /// match the original curve at the same source position (no reshaping or rescaling).
     #[test]
-    #[ignore = "KNOWN BUG PR #6: split reshapes the curve (~12%); ignored only because the apk job's cargo test gates device-qa. Run: cargo test -p filmcraft-ffi-mobile -- --ignored"]
-    fn known_bug_split_halves_follow_the_original_curve() {
+        fn known_bug_split_halves_follow_the_original_curve() {
         for c in all_curves() {
             let (p, a) = one_clip(10_000);
             p.set_speed_curve(a, c.clone()).unwrap();
