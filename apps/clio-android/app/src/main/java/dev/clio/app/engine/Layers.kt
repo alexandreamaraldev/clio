@@ -19,7 +19,9 @@ import uniffi.clio_ffi.Snapshot
 import uniffi.clio_ffi.TrackKind
 import uniffi.clio_ffi.Transition
 import uniffi.clio_ffi.TransitionKind
-import uniffi.clio_ffi.clipLook
+import uniffi.clio_ffi.KeyTracks
+import uniffi.clio_ffi.clipLookKeyed
+import uniffi.clio_ffi.keyedTransform
 
 /**
  * Phase 2 layers on Media3. The engine (`clip_look`) decides what a frame looks like; this file
@@ -44,13 +46,28 @@ object Layers {
     fun hasTransition(main: List<Clip>, index: Int) =
         main[index].transition.kind != TransitionKind.NONE || incoming(main, index).kind != TransitionKind.NONE
 
-    fun look(c: Clip, incoming: Transition, localMs: Long): FrameLook = clipLook(c, incoming, localMs.coerceAtLeast(0).toULong())
+    /** The engine's look (keyframes, then transitions): the one evaluation preview and export share. */
+    fun look(c: Clip, incoming: Transition, localMs: Long, keys: KeyTracks? = null): FrameLook =
+        clipLookKeyed(c, keys, incoming, localMs.coerceAtLeast(0).toULong())
+
+    /** A layer's transform at clip-local [localMs] (keyframes over the static transform). */
+    fun transformAt(c: Clip, keys: KeyTracks?, localMs: Long): LayerTransform =
+        if (keys == null) c.transform else keyedTransform(c.transform, keys, localMs.coerceIn(0, c.durationMs.toLong()).toULong())
+
+    /** Largest scale a layer reaches (bitmaps are decoded at that size). */
+    fun maxScale(c: Clip, keys: KeyTracks?): Float = (keys?.scale?.maxOfOrNull { it.value } ?: 0f).coerceAtLeast(c.transform.scale)
+
+    /** Main-track clip is animated in preview/export when it has a transition or keyframes. */
+    fun animated(main: List<Clip>, index: Int, keys: Map<ULong, KeyTracks>) = hasTransition(main, index) || keys.containsKey(main[index].id)
 
     /** NDC matrix for a main-track look (layer x/y are already NDC; rotation ignored on the main track). */
     fun ndcMatrix(t: LayerTransform): Matrix = Matrix().apply {
         postScale(t.scale, t.scale)
         postTranslate(t.x, t.y)
     }
+
+    /** Main-track brightness: transitions' fade times the keyed opacity (a main clip fades to black). */
+    fun mainBrightness(l: FrameLook): Float = l.brightness * l.transform.opacity
 
     fun brightnessMatrix(b: Float): FloatArray = floatArrayOf(
         b, 0f, 0f, 0f,
@@ -87,27 +104,27 @@ object Layers {
         fun reset() { look = IDENTITY }
         val effects = listOf(
             MatrixTransformation { _ -> ndcMatrix(look.transform) },
-            RgbMatrix { _, _ -> brightnessMatrix(look.brightness) },
+            RgbMatrix { _, _ -> brightnessMatrix(mainBrightness(look)) },
         )
     }
 
     /** Export: per-item effects, local time from the first frame the item sees. One FFI call per frame, shared by both effects. */
-    fun exportEffects(c: Clip, incoming: Transition): List<androidx.media3.common.Effect> {
-        if (c.transition.kind == TransitionKind.NONE && incoming.kind == TransitionKind.NONE) return emptyList()
-        val cache = LookCache(c, incoming)
+    fun exportEffects(c: Clip, incoming: Transition, keys: KeyTracks? = null): List<androidx.media3.common.Effect> {
+        if (keys == null && c.transition.kind == TransitionKind.NONE && incoming.kind == TransitionKind.NONE) return emptyList()
+        val cache = LookCache(c, incoming, keys)
         return listOf(
             MatrixTransformation { pts -> ndcMatrix(cache.at(pts).transform) },
-            RgbMatrix { pts, _ -> brightnessMatrix(cache.at(pts).brightness) },
+            RgbMatrix { pts, _ -> brightnessMatrix(mainBrightness(cache.at(pts))) },
         )
     }
 
     /** Memoises clip_look per presentation time (both GL effects ask for the same frame). */
-    class LookCache(private val c: Clip, private val incoming: Transition) {
+    class LookCache(private val c: Clip, private val incoming: Transition, private val keys: KeyTracks? = null) {
         private val clock = LocalClock()
         private var lastPts = Long.MIN_VALUE
         private var last: FrameLook? = null
         @Synchronized fun at(pts: Long): FrameLook {
-            if (pts != lastPts || last == null) { last = look(c, incoming, clock.ms(pts)); lastPts = pts }
+            if (pts != lastPts || last == null) { last = look(c, incoming, clock.ms(pts), keys); lastPts = pts }
             return last!!
         }
     }
@@ -128,10 +145,10 @@ object Layers {
     class FrameSource(
         private val context: Context, private val c: Clip, private val isImage: Boolean, canvasW: Int,
         /** Display height / width of the source (after rotation). */
-        val aspect: Float, memScale: Float = 1f,
+        val aspect: Float, memScale: Float = 1f, maxScale: Float = c.transform.scale,
     ) : AutoCloseable {
-        /** Wanted on-canvas width in px. */
-        val wantW = canvasW * c.transform.scale.coerceIn(LayerLimits.scaleRange)
+        /** Wanted on-canvas width in px (at the largest keyed scale). */
+        val wantW = canvasW * maxScale.coerceIn(LayerLimits.scaleRange)
         val targetW = (wantW * memScale).toInt().coerceIn(2, 4096)
         val targetH = (targetW * aspect).toInt().coerceIn(2, 4096)
         private val blank = Bitmap.createBitmap(2, 2, Bitmap.Config.ARGB_8888)
@@ -213,16 +230,16 @@ object Layers {
 
         companion object {
             /** Builds one source per layer, sized together under [LayerMemory.BUDGET_BYTES]. */
-            fun plan(context: Context, layers: List<Clip>, canvasW: Int, isImage: (Clip) -> Boolean): Map<ULong, FrameSource> {
+            fun plan(context: Context, layers: List<Clip>, canvasW: Int, keys: Map<ULong, KeyTracks> = emptyMap(), isImage: (Clip) -> Boolean): Map<ULong, FrameSource> {
                 val info = layers.map { c ->
                     val img = isImage(c)
                     val aspect = (if (img) null else SequentialVideoDecoder.probe(context, Uri.parse(c.source))?.let { (w, h, _) -> h.toFloat() / w })
                         ?: if (c.width > 0u && c.height > 0u) c.height.toFloat() / c.width.toFloat() else 9f / 16f
                     Triple(c, img, aspect)
                 }
-                val sizes = info.map { (c, _, a) -> val w = (canvasW * c.transform.scale.coerceIn(LayerLimits.scaleRange)).toInt().coerceIn(2, 4096); w to (w * a).toInt().coerceAtLeast(2) }
+                val sizes = info.map { (c, _, a) -> val w = (canvasW * maxScale(c, keys[c.id]).coerceIn(LayerLimits.scaleRange)).toInt().coerceIn(2, 4096); w to (w * a).toInt().coerceAtLeast(2) }
                 val scale = LayerMemory.fit(sizes, info.map { if (it.second) LayerMemory.IMAGE_BPP else LayerMemory.VIDEO_BPP })
-                return info.associate { (c, img, a) -> c.id to FrameSource(context, c, img, canvasW, a, scale) }
+                return info.associate { (c, img, a) -> c.id to FrameSource(context, c, img, canvasW, a, scale, maxScale(c, keys[c.id])) }
             }
         }
     }
@@ -237,6 +254,7 @@ object Layers {
         private val itemStartMs: Long,
         private val canvasW: Int,
         private val canvasH: Int,
+        private val keys: KeyTracks? = null,
     ) : BitmapOverlay() {
         private val clock = LocalClock()
         private var visible = false
@@ -249,9 +267,11 @@ object Layers {
         }
 
         override fun getOverlaySettings(presentationTimeUs: Long): OverlaySettings {
-            val tr = c.transform
-            val up = src.wantW / src.targetW
-            val wPx = src.wantW; val hPx = src.wantW * src.aspect
+            val tr = transformAt(c, keys, itemStartMs + clock.ms(presentationTimeUs) - c.startMs.toLong())
+            // The bitmap is sized for the largest keyed scale; shrink it to this frame's scale.
+            val k = tr.scale.coerceIn(LayerLimits.scaleRange) * canvasW / src.wantW
+            val up = src.wantW / src.targetW * k
+            val wPx = src.wantW * k; val hPx = wPx * src.aspect
             // Half-size of the layer in background NDC (1 = half the canvas). Media3 applies the
             // overlay anchor after rotating about the layer centre, so the shift stays unrotated.
             val halfW = wPx / canvasW

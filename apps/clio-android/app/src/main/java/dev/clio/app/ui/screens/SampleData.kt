@@ -10,6 +10,8 @@ data class UiClip(
     val detached: Boolean = false,
     /** Speed curve (preset id or "personalizado") and its points (x 0..1, speed); null = constant speed. */
     val speedPreset: String? = null, val speedPoints: List<Pair<Float, Float>> = emptyList(),
+    /** Keyframes (clip-local seconds) and, when position/scale run start→end only, the zoom/pan frames. */
+    val keys: List<UiKey> = emptyList(), val zoomPan: UiZoomPan? = null, val keyable: Boolean = false,
 )
 data class UiTrack(val name: String, val kind: String, val clips: List<UiClip>)
 

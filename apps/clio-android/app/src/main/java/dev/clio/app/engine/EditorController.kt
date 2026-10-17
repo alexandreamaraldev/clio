@@ -150,6 +150,9 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
     private var clipStarts: LongArray = LongArray(0)
     /** Speed curves of main clips by id: source <-> timeline mapping and per-segment preview speed. */
     private var speedMaps: Map<Long, SpeedMap> = emptyMap()
+    /** Keyframes by clip id (engine evaluates them; preview and export share `clip_look_keyed`). */
+    private var keyTracks: Map<ULong, uniffi.clio_ffi.KeyTracks> = emptyMap()
+    private var allClips: Map<Long, uniffi.clio_ffi.Clip> = emptyMap()
     private fun localOf(c: uniffi.clio_ffi.Clip?, srcMs: Long): Long = c?.let { speedMaps[it.id.toLong()] }?.timelineAt(srcMs.toDouble())?.toLong() ?: (srcMs / (c?.speed ?: 1f)).toLong()
     private fun srcOf(c: uniffi.clio_ffi.Clip?, localMs: Long): Long = c?.let { speedMaps[it.id.toLong()] }?.sourceAt(localMs.toDouble())?.toLong() ?: Mix.spanMs(localMs, c?.speed ?: 1f)
     private var videoClips: List<uniffi.clio_ffi.Clip> = emptyList()
@@ -198,12 +201,16 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
 
     private fun apply(s: Snapshot, rebuildPlayer: Boolean) {
         val curves = s.speedCurves.associate { it.clipId to it.curve }
+        keyTracks = s.keyframes.associate { it.clipId to it.keys }
+        allClips = s.tracks.flatMap { it.clips }.associateBy { it.id.toLong() }
         speedMaps = s.tracks.flatMap { it.clips }.mapNotNull { c -> curves[c.id]?.let { c.id.toLong() to SpeedMap.of(it, Mix.spanMs(c.durationMs.toLong(), c.speed), c.durationMs.toLong()) } }.toMap()
         val uiTracks = s.tracks.filter { it.clips.isNotEmpty() || it.kind == TrackKind.VIDEO }.map { t ->
             UiTrack(t.name, when (t.kind) { TrackKind.VIDEO -> "video"; TrackKind.AUDIO -> "audio"; TrackKind.TEXT -> "text"; TrackKind.EFFECT -> "fx"; TrackKind.OVERLAY -> "overlay" },
                 t.clips.map { c -> UiClip(c.name, c.startMs.toFloat() / 1000f, c.durationMs.toFloat() / 1000f, c.id.toLong(), c.source, c.inMs.toFloat() / 1000f,
                     c.sourceMs.toFloat() / 1000f, c.speed, c.volume, c.fadeInMs.toFloat() / 1000f, c.fadeOutMs.toFloat() / 1000f, c.muted, detached = c.detachedTo != null,
-                    speedPreset = curves[c.id]?.preset, speedPoints = curves[c.id]?.let(::visiblePoints).orEmpty()) })
+                    speedPreset = curves[c.id]?.preset, speedPoints = curves[c.id]?.let(::visiblePoints).orEmpty(),
+                    keys = LayersMapping.keys(keyTracks[c.id]), keyable = t.kind == TrackKind.VIDEO || t.kind == TrackKind.OVERLAY,
+                    zoomPan = if (t.kind == TrackKind.VIDEO) LayersMapping.zoomPan(keyTracks[c.id], c.durationMs.toLong()) else null) })
         }
         val caps = s.captions.map { Engine.Cap(it.startMs.toLong(), it.endMs.toLong(), it.text, it.words) }
         val withCaps = if (caps.isEmpty()) uiTracks else uiTracks + UiTrack("Legendas", "text",
@@ -289,14 +296,14 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
     private fun updateLook(idx: Int, localMs: Long) {
         val c = videoClips.getOrNull(idx) ?: return
         // No FFI call (and no GL effects installed) unless this clip has a transition.
-        if (!Layers.hasTransition(videoClips, idx)) { previewLook.reset(); return }
-        previewLook.look = Layers.look(c, Layers.incoming(videoClips, idx), localMs)
+        if (!Layers.animated(videoClips, idx, keyTracks)) { previewLook.reset(); return }
+        previewLook.look = Layers.look(c, Layers.incoming(videoClips, idx), localMs, keyTracks[c.id])
     }
 
     /** Installs the transition GL effects only while the main track has any transition. */
     private var effectsOn = false to false
     private fun syncPreviewEffects() {
-        val t = videoClips.indices.any { Layers.hasTransition(videoClips, it) }
+        val t = videoClips.indices.any { Layers.animated(videoClips, it, keyTracks) }
         val app = getApplication<Application>()
         // Media3 1.4's LUT shader is SDR-only: with an HDR clip in the playlist the grade is not previewed.
         val vids = videoClips.map { it.source }.filter { !MediaKind.isImage(app, it) }
@@ -532,8 +539,38 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
 
     // --- Layers (PIP) and transitions ---
     override fun addLayer() { player.pause(); pickForLayer = true; _events.tryEmit(EditorEvent.PickMedia) }
-    override fun setLayerTransform(clipId: Long, t: UiTransform) =
-        launchEdit { runCatching { setClipTransform(clipId.toULong(), LayersMapping.transform(t)) } }.let { }
+    override fun setLayerTransform(clipId: Long, t: UiTransform) {
+        // A keyframed layer: the gesture sets (or updates) the key at the playhead instead.
+        val c = allClips[clipId]
+        if (c != null && keyTracks.containsKey(c.id)) {
+            val local = localMsOf(c)
+            launchEdit { runCatching { setKeyframeAt(c.id, local.toULong(), LayersMapping.transform(t), easeAt(c, local)) } }
+            return
+        }
+        launchEdit { runCatching { setClipTransform(clipId.toULong(), LayersMapping.transform(t)) } }
+    }
+
+    // --- Keyframes ---
+    private fun localMsOf(c: uniffi.clio_ffi.Clip): Long = ((playheadState.floatValue * 1000).toLong() - c.startMs.toLong()).coerceIn(0, c.durationMs.toLong())
+    private fun easeAt(c: uniffi.clio_ffi.Clip, local: Long): uniffi.clio_ffi.Ease =
+        keyTracks[c.id]?.let { k -> listOf(k.x, k.y, k.scale, k.rotation, k.opacity).flatten().lastOrNull { it.tMs.toLong() <= local + 20 }?.ease } ?: uniffi.clio_ffi.Ease.SMOOTH
+    private fun keyEdit(clipId: Long, block: ClioProject.(uniffi.clio_ffi.Clip, Long) -> Unit) {
+        val c = allClips[clipId] ?: return
+        player.pause()
+        val local = localMsOf(c)
+        launchEdit { runCatching { block(c, local) } }
+    }
+    override fun toggleKeyframe(clipId: Long) = keyEdit(clipId) { c, l -> toggleKeyframe(c.id, l.toULong()) }
+    override fun setKeyEase(clipId: Long, ease: KeyEase) = keyEdit(clipId) { c, l -> setKeyframeEase(c.id, l.toULong(), LayersMapping.ease(ease)) }
+    override fun setZoomPan(clipId: Long, zp: UiZoomPan) = keyEdit(clipId) { c, _ ->
+        setZoomPan(c.id, LayersMapping.transform(zp.start), LayersMapping.transform(zp.end), LayersMapping.ease(zp.ease))
+    }
+    override fun clearKeyframes(clipId: Long) = keyEdit(clipId) { c, _ -> clearKeyframes(c.id) }
+    override fun layerTransformAt(clipId: Long, localMs: Long): UiTransform? {
+        val c = allClips[clipId] ?: return null
+        val k = keyTracks[c.id] ?: return null
+        return LayersMapping.ui(Layers.transformAt(c, k, localMs))
+    }
     override fun setTransition(clipId: Long, style: TransitionStyle, durS: Float) = launchEdit(rebuildPlayer = false) {
         runCatching { setTransition(clipId.toULong(), LayersMapping.kind(style), (durS * 1000).toLong().coerceAtLeast(0).toULong()) }
     }.let { }

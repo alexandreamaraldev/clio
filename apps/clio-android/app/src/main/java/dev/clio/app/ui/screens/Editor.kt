@@ -67,6 +67,7 @@ private val tools = listOf(
     Tool(Icons.Outlined.Layers, "Camadas"), Tool(Icons.Outlined.Compare, "Transição"),
     Tool(Icons.Outlined.FilterVintage, "Filtros"), Tool(Icons.Outlined.Tune, "Ajustes"),
     Tool(Icons.Outlined.AutoAwesome, "Efeitos", ready = false),
+    Tool(Icons.Outlined.Animation, "Animar"),
 )
 const val TOOL_SPLIT = 0
 const val TOOL_TEXT = 1
@@ -80,7 +81,8 @@ const val TOOL_LAYERS = 8
 const val TOOL_TRANSITION = 9
 const val TOOL_FILTERS = 10
 const val TOOL_ADJUST = 11
-private val panelTools = setOf(TOOL_TEXT, TOOL_MUSIC, TOOL_CAPTIONS, TOOL_SPEED, TOOL_VOLUME, TOOL_FORMAT, TOOL_LAYERS, TOOL_TRANSITION, TOOL_FILTERS, TOOL_ADJUST)
+const val TOOL_ANIMATE = 13
+private val panelTools = setOf(TOOL_TEXT, TOOL_MUSIC, TOOL_CAPTIONS, TOOL_SPEED, TOOL_VOLUME, TOOL_FORMAT, TOOL_LAYERS, TOOL_TRANSITION, TOOL_FILTERS, TOOL_ADJUST, TOOL_ANIMATE)
 
 @Immutable
 data class TextItem(val id: Long, val text: String, val startMs: Long, val endMs: Long, val style: uniffi.clio_ffi.TextStyle = dev.clio.app.engine.StyledText.fallbackStyle)
@@ -163,6 +165,13 @@ interface EditorActions {
     fun previewGrade(clipId: Long, grade: uniffi.clio_ffi.ColorGrade?) {}
     fun setGrade(clipId: Long, grade: uniffi.clio_ffi.ColorGrade) {}
     fun applyGradeToAll(clipId: Long) {}
+    /** Keyframes (at the playhead), ease of the key there, zoom/pan, clear. */
+    fun toggleKeyframe(clipId: Long) {}
+    fun setKeyEase(clipId: Long, ease: KeyEase) {}
+    fun setZoomPan(clipId: Long, zp: UiZoomPan) {}
+    fun clearKeyframes(clipId: Long) {}
+    /** A keyed layer's transform at clip-local [localMs] (engine evaluation); null = static. */
+    fun layerTransformAt(clipId: Long, localMs: Long): UiTransform? = null
 }
 
 object NoActions : EditorActions
@@ -209,7 +218,7 @@ fun EditorScreen(
                 if (ui.blurBg && !ui.fill) BlurBackdrop(ui.tracks.firstOrNull { it.kind == "video" }?.clips.orEmpty(), playhead)
                 preview(ui.fill)
                 LayerStack(ui.layers, playhead, ui.playing, selectedClip, { selectedClip = it; selectedTool = TOOL_LAYERS }, actions::setLayerTransform,
-                    canvasW = ui.canvasW, canvasH = ui.canvasH)
+                    canvasW = ui.canvasW, canvasH = ui.canvasH, keyedAt = actions::layerTransformAt)
                 StyledTextLayer(ui.texts, playhead, Modifier.matchParentSize())
                 if (ui.hasMedia) Text(when { ui.fill -> "Preencher"; ui.blurBg -> "Desfoque"; else -> "Ajustar" }, style = MaterialTheme.typography.labelSmall, color = ClioColors.OnMedia,
                     modifier = Modifier.align(Alignment.TopEnd).padding(10.dp).pressable(onClick = actions::toggleFill)
@@ -239,6 +248,13 @@ fun EditorScreen(
             }
             Spacer(Modifier.weight(1f))
             Spacer(Modifier.width(Space.xs))
+            // Diamond: keyframe at the playhead on the selected clip (shown once a keyable clip is selected).
+            val keyClip = ui.tracks.flatMap { it.clips }.firstOrNull { it.id == selectedClip && it.keyable }
+            if (keyClip != null) {
+                val onKey by remember(keyClip) { derivedStateOf { keyAt(keyClip.keys, playhead() - keyClip.startS) != null } }
+                val inside by remember(keyClip) { derivedStateOf { val l = playhead() - keyClip.startS; l >= 0f && l <= keyClip.lenS } }
+                KeyframeButton(onKey, inside) { actions.toggleKeyframe(keyClip.id) }
+            }
             IconAction(Icons.AutoMirrored.Outlined.Undo, stringResource(R.string.action_undo), ui.canUndo, actions::undo)
             IconAction(Icons.AutoMirrored.Outlined.Redo, stringResource(R.string.action_redo), ui.canRedo, actions::redo)
             IconAction(Icons.Outlined.DeleteOutline, stringResource(R.string.action_delete), selectedClip != null) {
@@ -274,6 +290,13 @@ fun EditorScreen(
                     val commit = { x: uniffi.clio_ffi.ColorGrade -> clip?.let { actions.setGrade(it.id, x) }; Unit }
                     val all = { clip?.let { actions.applyGradeToAll(it.id) }; Unit }
                     if (panel == TOOL_FILTERS) FiltersPanel(clip, g, prev, commit, all) else AdjustPanel(clip, g, prev, commit, all)
+                }
+                TOOL_ANIMATE -> {
+                    val isMain = target != null && ui.tracks.any { it.kind == "video" && target in it.clips }
+                    AnimatePanel(target?.takeIf { it.keyable }, { target?.let { c -> (playhead() - c.startS).takeIf { it >= 0f && it <= c.lenS } } },
+                        ui.canvasW.toFloat() / ui.canvasH.coerceAtLeast(1), allowZoomPan = isMain,
+                        onToggle = { target?.let { actions.toggleKeyframe(it.id) } }, onEase = { e -> target?.let { actions.setKeyEase(it.id, e) } },
+                        onZoomPan = { z -> target?.let { actions.setZoomPan(it.id, z) } }, onClear = { target?.let { actions.clearKeyframes(it.id) } })
                 }
                 TOOL_FORMAT -> FormatPanel(ui.canvasW, ui.canvasH, ui.fill, ui.blurBg, actions::setAspect, actions::setFraming)
                 else -> Timeline(ui.tracks, ui.durationS, playhead, ui.playing, selectedClip, { selectedClip = it }, actions::scrub, actions::addClip,
@@ -553,6 +576,7 @@ private fun ClipView(
         Text(c.label + if (c.speed != 1f) "  ${fmtSpeed(c.speed)}" else "", style = MaterialTheme.typography.labelSmall, color = ClioColors.TextPrimary, maxLines = 1,
             modifier = Modifier.padding(horizontal = 16.dp).then(
                 if (kind == "video" && c.source != null) Modifier.clip(ClioShapes.pill).background(ClioColors.MediaScrim).padding(horizontal = 6.dp, vertical = 2.dp) else Modifier))
+        if (c.keys.isNotEmpty()) KeyDiamonds(c.keys, c.lenS, Modifier.matchParentSize().padding(horizontal = 2.dp))
         if (c.muted) Icon(Icons.Outlined.VolumeOff, null, tint = ClioColors.OnMedia, modifier = Modifier.align(Alignment.TopEnd).padding(4.dp).size(12.dp))
         if (isSel && onTrim != null) {
             val cur by rememberUpdatedState(onTrim)

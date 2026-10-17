@@ -98,7 +98,7 @@ internal fun panToCanvas(localX: Float, localY: Float, rotationDeg: Float, w: Fl
 fun LayerStack(
     layers: List<UiLayer>, playhead: () -> Float, playing: Boolean, selected: Long?,
     onSelect: (Long) -> Unit, onTransform: (Long, UiTransform) -> Unit, modifier: Modifier = Modifier,
-    canvasW: Int = 0, canvasH: Int = 0,
+    canvasW: Int = 0, canvasH: Int = 0, keyedAt: (Long, Long) -> UiTransform? = { _, _ -> null },
 ) {
     if (layers.isEmpty()) return
     var window by remember { mutableStateOf(emptyList<UiLayer>()) }
@@ -112,7 +112,7 @@ fun LayerStack(
         val (w, h) = if (bw / bh.coerceAtLeast(1f) > aspect) (bh * aspect) to bh else bw to (bw / aspect)
         val density = androidx.compose.ui.platform.LocalDensity.current
         Box(Modifier.size(with(density) { w.toDp() }, with(density) { h.toDp() })) {
-            window.forEach { l -> key(l.id) { LayerView(l, w, h, playhead, playing, l.id == selected, onSelect, onTransform) } }
+            window.forEach { l -> key(l.id) { LayerView(l, w, h, playhead, playing, l.id == selected, onSelect, onTransform, keyedAt) } }
         }
     }
 }
@@ -120,10 +120,13 @@ fun LayerStack(
 @Composable
 private fun LayerView(
     l: UiLayer, w: Float, h: Float, playhead: () -> Float, playing: Boolean, selected: Boolean,
-    onSelect: (Long) -> Unit, onTransform: (Long, UiTransform) -> Unit,
+    onSelect: (Long) -> Unit, onTransform: (Long, UiTransform) -> Unit, keyedAt: (Long, Long) -> UiTransform? = { _, _ -> null },
 ) {
     var t by remember(l.id, l.transform) { mutableStateOf(l.transform) }
+    var seeded by remember(l.id) { mutableStateOf(false) }
     val state = rememberTransformableState { zoom, pan, rot ->
+        // A keyframed layer is grabbed where it is on screen now.
+        if (!seeded) { seeded = true; keyedAt(l.id, (playhead() * 1000).toLong() - l.startMs)?.let { t = it } }
         val (dx, dy) = panToCanvas(pan.x, pan.y, t.rotation, w, h)
         t = t.copy(
             scale = (t.scale * zoom).coerceIn(LayerLimits.scaleRange),
@@ -133,7 +136,7 @@ private fun LayerView(
             rotation = t.rotation - rot,
         )
     }
-    LaunchedEffect(state.isTransformInProgress) { if (!state.isTransformInProgress && t != l.transform) onTransform(l.id, t) }
+    LaunchedEffect(state.isTransformInProgress) { if (!state.isTransformInProgress) { if (seeded && t != l.transform) onTransform(l.id, t); seeded = false } }
     val pop by animateFloatAsState(if (selected && state.isTransformInProgress) 1.03f else 1f, ClioMotion.snappy(), label = "pop")
     val density = androidx.compose.ui.platform.LocalDensity.current
     var aspect by remember(l.id) { mutableFloatStateOf(16f / 9f) }
@@ -142,12 +145,16 @@ private fun LayerView(
     Box(
         Modifier
             .graphicsLayer {
-                translationX = w / 2 + t.x * w / 2 - lw / 2
-                translationY = h / 2 - t.y * h / 2 - lh / 2
                 // Draw phase: hidden while preloading (before its start), no recomposition.
                 val now = (playhead() * 1000).toLong()
-                alpha = if (now >= l.startMs) t.opacity else 0f
-                rotationZ = -t.rotation; scaleX = pop; scaleY = pop
+                // Keyframed layers follow the engine's evaluation, except while being dragged.
+                val k = if (state.isTransformInProgress) null else keyedAt(l.id, now - l.startMs)
+                val e = k ?: t
+                val ks = e.scale / t.scale.coerceAtLeast(1e-3f)
+                translationX = w / 2 + e.x * w / 2 - lw / 2
+                translationY = h / 2 - e.y * h / 2 - lh / 2
+                alpha = if (now >= l.startMs) e.opacity else 0f
+                rotationZ = -e.rotation; scaleX = pop * ks; scaleY = pop * ks
             }
             .size(with(density) { lw.toDp() }, with(density) { lh.toDp() })
             .then(if (selected) Modifier.border(1.5.dp, ClioColors.Clay, ClioShapes.sm) else Modifier)

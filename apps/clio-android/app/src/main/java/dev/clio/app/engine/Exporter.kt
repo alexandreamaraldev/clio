@@ -128,7 +128,8 @@ class Exporter(private val context: Context) {
 
         // One frame source per layer, shared by every main item it overlaps (closed after export).
         val layers = Layers.overlayClips(snap)
-        val sources = Layers.FrameSource.plan(context, layers, spec.width) { MediaKind.isImage(context, it.source) }
+        val keysOf = snap.keyframes.associate { it.clipId to it.keys }
+        val sources = Layers.FrameSource.plan(context, layers, spec.width, keysOf) { MediaKind.isImage(context, it.source) }
         opened += sources.values
         curveOf = snap.speedCurves.associate { it.clipId to it.curve }
         val items = video.mapIndexed { index, c ->
@@ -143,7 +144,7 @@ class Exporter(private val context: Context) {
             }.build()
             // Overlay/PIP layers that overlap this item (bottom row first); drawn after the blur backdrop, before text.
             val layerOverlays = layers.filter { it.startMs < c.startMs + c.durationMs && it.startMs + it.durationMs > c.startMs }
-                .map { Layers.LayerOverlay(sources.getValue(it.id), it, c.startMs.toLong(), spec.width, spec.height) }
+                .map { Layers.LayerOverlay(sources.getValue(it.id), it, c.startMs.toLong(), spec.width, spec.height, keysOf[it.id]) }
             val incoming = Layers.incoming(video, index)
             val video = mutableListOf<androidx.media3.common.Effect>()
             // A speed curve retimes frames onto the output grid (fast parts drop, slow parts repeat frames;
@@ -159,7 +160,7 @@ class Exporter(private val context: Context) {
             if (blur) blurredBackdrop(c, spec.width, spec.height)?.let { video += OverlayEffect(ImmutableList.of(BitmapOverlay.createStaticBitmapOverlay(it))) }
             // Filter + colour adjustments: the same baked LUT effect the preview uses (grades the backdrop too).
             gradeOf[c.id.toLong()]?.let { g -> val plane = gradeLib.plane(g); video += GradeLut { plane } }
-            video += Layers.exportEffects(c, incoming)
+            video += Layers.exportEffects(c, incoming, keysOf[c.id])
             val overlays = mutableListOf<androidx.media3.effect.TextureOverlay>()
             overlays += layerOverlays
             overlays += StyledTextOverlay(context, c.startMs.toLong(), spec.width, spec.height, 0f) { TextScene.text(texts, it) }
