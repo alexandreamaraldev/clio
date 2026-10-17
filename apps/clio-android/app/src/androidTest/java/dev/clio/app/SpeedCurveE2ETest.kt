@@ -65,9 +65,11 @@ class SpeedCurveE2ETest {
             val uri = runBlocking { withTimeout(240_000) { Exporter(ctx).export(p.snapshot(), ExportSpec("speed-$name", 720, 1280, 30), CaptionStyle.Clean) {} } }
             val info = ExportProbe.info(ctx, uri)
             log("$name: timeline ${total}ms, video ${info.durationMs}ms, audio ${info.audioDurationMs}ms, fps ${"%.1f".format(info.fps)}")
-            assertTrue("$name video ${info.durationMs} vs $total", abs(info.durationMs - total) <= 200)
+            // Runs 38990799517 (06832da): video within 2 ms, audio within 5 ms. Limits: 1 frame (33 ms) + 7 ms
+            // container rounding for video; + one AAC frame (23 ms) of encoder padding for audio.
+            assertTrue("$name video ${info.durationMs} vs $total", abs(info.durationMs - total) <= 40)
             assertTrue("$name has audio", info.hasAudio)
-            assertTrue("$name audio ${info.audioDurationMs} vs $total", abs(info.audioDurationMs - total) <= 300)
+            assertTrue("$name audio ${info.audioDurationMs} vs $total", abs(info.audioDurationMs - total) <= 60)
         }
     }
 
