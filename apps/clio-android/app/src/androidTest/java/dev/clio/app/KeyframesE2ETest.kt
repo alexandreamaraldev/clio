@@ -101,10 +101,10 @@ class KeyframesE2ETest {
         compose.waitForIdle()
     }
 
-    /** Slider order in LayersPanel: size, rotation, opacity, horizontal, vertical. */
-    private fun slider(i: Int, v: Float) {
-        compose.onAllNodes(SemanticsMatcher.keyIsDefined(SemanticsActions.SetProgress), useUnmergedTree = true)[i]
-            .performSemanticsAction(SemanticsActions.SetProgress) { it(v) }
+    /** LayersPanel slider by label (Tamanho, Opacidade, Horizontal, ...), set through its SetProgress semantics. */
+    private fun slider(label: String, v: Float) {
+        val n = compose.onNodeWithTag("layer-slider-$label", useUnmergedTree = true).performScrollTo()
+        n.performSemanticsAction(SemanticsActions.SetProgress) { it(v) }
         compose.waitForIdle()
     }
 
@@ -143,7 +143,7 @@ class KeyframesE2ETest {
         // Key B: move the playhead, then move the layer (sets/updates the key at the playhead).
         scrubForward(70f)
         tool("Camadas")
-        slider(0, 0.3f); slider(2, 0.5f); slider(3, -0.5f)
+        slider("Tamanho", 0.3f); slider("Opacidade", 0.5f); slider("Horizontal", -0.5f)
         waitUi("key B") { u -> u.tracks.flatMap { it.clips }.any { it.keys.size == 2 } }
         tool("Camadas")
         shot("keys-01-two-keys")

@@ -275,7 +275,9 @@ fun EditorScreen(
                     actions::pickMusic, actions::removeMusic, actions::toggleVoiceover, { actions.detachAudio(target?.id) }, actions::addSfx)
                 TOOL_SPEED -> SpeedPanel(target, { actions.setSpeed(target?.id, it) }, { actions.setSpeedPreset(target?.id, it) }, { actions.setSpeedCurve(target?.id, it) }, actions::curveSpeedAt)
                 TOOL_VOLUME -> VolumePanel(target) { v, fi, fo, m -> actions.setAudio(target?.id, v, fi, fo, m) }
-                TOOL_LAYERS -> LayersPanel(ui.layers.firstOrNull { it.id == selectedClip }, actions::addLayer, actions::setLayerTransform) {
+                TOOL_LAYERS -> LayersPanel(ui.layers.firstOrNull { it.id == selectedClip }?.let { l ->
+                    // A keyframed layer shows (and edits) its values at the playhead.
+                    actions.layerTransformAt(l.id, (playhead() * 1000).toLong() - l.startMs)?.let { l.copy(transform = it) } ?: l }, actions::addLayer, actions::setLayerTransform) {
                     actions.setLayerTransform(it, UiTransform(0.45f, 0.5f, 0.4f, 0f, 1f))
                 }
                 TOOL_TRANSITION -> {

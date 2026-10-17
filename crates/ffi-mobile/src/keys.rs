@@ -80,6 +80,11 @@ pub struct KeyTracks {
     pub rotation: Vec<Keyframe>,
     #[serde(default)]
     pub opacity: Vec<Keyframe>,
+    /// Zoom/Pan: scale 1 means "fill the canvas" (the clip's aspect against the canvas), and pans
+    /// are clamped so the frame always covers it (see [`zoom_pan_cover`]).
+    #[serde(default)]
+    #[uniffi(default = false)]
+    pub fill: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
@@ -203,13 +208,47 @@ fn eval_all(base: LayerTransform, k: &KeyTracks, t: f64) -> LayerTransform {
     }
 }
 
-/// [`crate::clip_look`] with keyframes: the keyed transform, then transitions on top. Preview and
-/// export both call this for every animated clip.
+/// Zoom/Pan in canvas space: `t.scale` (>= 1) is relative to the scale at which the clip fills the
+/// canvas (its fitted size against the canvas aspect; 1 when the project already crops to fill),
+/// and x/y are clamped so the scaled frame covers the canvas (no black edges).
 #[uniffi::export]
-pub fn clip_look_keyed(clip: &Clip, keys: Option<KeyTracks>, incoming: Transition, local_ms: u64) -> FrameLook {
+pub fn zoom_pan_cover(t: LayerTransform, clip: &Clip, canvas_w: u32, canvas_h: u32, crop: bool) -> LayerTransform {
+    let (ex, ey) = fitted_extent(clip.width, clip.height, canvas_w, canvas_h, crop);
+    let cover = 1.0 / ex.min(ey);
+    let s = t.scale.max(1.0) * cover;
+    let (bx, by) = ((s * ex - 1.0).max(0.0), (s * ey - 1.0).max(0.0));
+    LayerTransform { x: t.x.clamp(-bx, bx), y: t.y.clamp(-by, by), scale: s, ..t }
+}
+
+/// Half-extent (NDC, 1 = canvas edge) of the clip's frame after the project's fit/crop.
+fn fitted_extent(w: u32, h: u32, cw: u32, ch: u32, crop: bool) -> (f32, f32) {
+    if w == 0 || h == 0 || cw == 0 || ch == 0 {
+        return (1.0, 1.0);
+    }
+    let r = (w as f32 / h as f32) / (cw as f32 / ch as f32); // >1: wider than the canvas
+    match (r >= 1.0, crop) {
+        (true, false) => (1.0, 1.0 / r),
+        (false, false) => (r, 1.0),
+        (true, true) => (r, 1.0),
+        (false, true) => (1.0, 1.0 / r),
+    }
+}
+
+/// Main-track clip transform at `local_ms` from its keys (zoom/pan covered), without transitions.
+#[uniffi::export]
+pub fn main_keyed_transform(clip: &Clip, keys: KeyTracks, local_ms: u64, canvas_w: u32, canvas_h: u32, crop: bool) -> LayerTransform {
+    let t = eval_all(clip.transform, &keys, local_ms as f64);
+    if keys.fill { zoom_pan_cover(t, clip, canvas_w, canvas_h, crop) } else { t }
+}
+
+/// [`crate::clip_look`] with keyframes: the keyed transform (zoom/pan covered), then transitions on
+/// top. Export calls this per frame for animated main-track clips; the preview shows the same
+/// keyed transform ([`main_keyed_transform`]) on the canvas.
+#[uniffi::export]
+pub fn clip_look_keyed(clip: &Clip, keys: Option<KeyTracks>, incoming: Transition, local_ms: u64, canvas_w: u32, canvas_h: u32, crop: bool) -> FrameLook {
     let mut c = clip.clone();
-    if let Some(k) = keys.as_ref() {
-        c.transform = eval_all(clip.transform, k, local_ms as f64);
+    if let Some(k) = keys {
+        c.transform = main_keyed_transform(clip, k, local_ms, canvas_w, canvas_h, crop);
     }
     crate::clip_look(&c, incoming, local_ms)
 }
@@ -268,7 +307,7 @@ impl TimeMap {
 /// with boundary keys holding the animated value there.
 pub(crate) fn retime(keys: &KeyTracks, old: &TimeMap, new: &TimeMap) -> KeyTracks {
     let d = new.clip.duration_ms;
-    let mut out = KeyTracks::default();
+    let mut out = KeyTracks { fill: keys.fill, ..Default::default() };
     for p in KEY_PROPS {
         let src = keys.get(p);
         if src.is_empty() {
@@ -414,6 +453,7 @@ impl ClioProject {
             (s.keyframes.get(&clip_id).cloned().unwrap_or_default(), s.tracks[ti].clips[ci].duration_ms)
         };
         let pair = |a: f32, b: f32| vec![Keyframe::new(0, a, ease), Keyframe::new(d, b, Ease::Linear)];
+        k.fill = true;
         k.x = pair(start.x, end.x);
         k.y = pair(start.y, end.y);
         k.scale = pair(start.scale, end.scale);
@@ -536,7 +576,39 @@ mod tests {
         p.set_keyframe_at(a, 0, tf(0.0, 1.0, 1.0), Ease::Linear).unwrap();
         p.set_keyframe_at(a, 4000, tf(0.0, 2.0, 1.0), Ease::Linear).unwrap();
         let c = p.tracks()[0].clips[0].clone();
-        let l = clip_look_keyed(&c, Some(keys(&p, a)), Transition::default(), 2000);
+        let l = clip_look_keyed(&c, Some(keys(&p, a)), Transition::default(), 2000, 1920, 1080, false);
         assert!((l.transform.scale - 1.5).abs() < 1e-4);
+    }
+
+    #[test]
+    fn zoom_pan_covers_the_canvas_for_any_aspect() {
+        let p = ClioProject::new("k".into(), 1080, 1920).unwrap(); // portrait canvas
+        let t = p.add_track(TrackKind::Video, "v".into());
+        let a = p.append_clip(t, "a".into(), "a.jpg".into(), 3000).unwrap();
+        p.set_clip_source_info(a, 0, 1280, 720); // landscape still
+        p.set_zoom_pan(a, tf(0.15, 1.0, 1.0), tf(-5.0, 1.25, 1.0), Ease::Linear).unwrap();
+        let c = p.tracks()[0].clips[0].clone();
+        let k = keys(&p, a);
+        assert!(k.fill);
+        for ms in [0u64, 1500, 3000] {
+            for crop in [false, true] {
+                let m = main_keyed_transform(&c, k.clone(), ms, 1080, 1920, crop);
+                let (ex, ey) = fitted_extent(1280, 720, 1080, 1920, crop);
+                // Frame edges stay outside the canvas on every side.
+                assert!(m.x - m.scale * ex <= -1.0 + 1e-4 && m.x + m.scale * ex >= 1.0 - 1e-4, "{ms} {crop}: {m:?}");
+                assert!(m.y - m.scale * ey <= -1.0 + 1e-4 && m.y + m.scale * ey >= 1.0 - 1e-4, "{ms} {crop}: {m:?}");
+            }
+        }
+        // Fit mode: scale 1 = fill (16:9 in 9:16 -> ~3.16x), so the start frame is already zoomed to cover.
+        let m0 = main_keyed_transform(&c, k.clone(), 0, 1080, 1920, false);
+        assert!((m0.scale - (1280.0 / 720.0) / (1080.0 / 1920.0)).abs() < 1e-3, "{m0:?}");
+        // Same aspect: scale 1.25, pan limited to 0.25.
+        let q = ClioProject::new("k".into(), 1280, 720).unwrap();
+        let t = q.add_track(TrackKind::Video, "v".into());
+        let b = q.append_clip(t, "b".into(), "b.jpg".into(), 3000).unwrap();
+        q.set_clip_source_info(b, 0, 1280, 720);
+        q.set_zoom_pan(b, tf(0.6, 1.25, 1.0), tf(0.0, 1.25, 1.0), Ease::Linear).unwrap();
+        let m = main_keyed_transform(&q.tracks()[0].clips[0], keys(&q, b), 0, 1280, 720, false);
+        assert!((m.scale - 1.25).abs() < 1e-4 && (m.x - 0.25).abs() < 1e-4, "{m:?}");
     }
 }

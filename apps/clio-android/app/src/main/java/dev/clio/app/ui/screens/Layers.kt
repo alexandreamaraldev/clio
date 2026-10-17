@@ -15,6 +15,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
+import androidx.compose.ui.platform.testTag
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
@@ -219,7 +220,7 @@ private fun LayerVideo(l: UiLayer, playhead: () -> Float, playing: Boolean, onAs
 private fun LayerSlider(label: String, value: String, v: Float, range: ClosedFloatingPointRange<Float>, onChange: (Float) -> Unit, onDone: () -> Unit) {
     Row(verticalAlignment = Alignment.CenterVertically) {
         Text(label, style = MaterialTheme.typography.labelMedium, color = ClioColors.TextSecondary, modifier = Modifier.width(76.dp))
-        Slider(v, onChange, Modifier.weight(1f), valueRange = range, onValueChangeFinished = onDone, colors = SliderDefaults.colors(
+        Slider(v, onChange, Modifier.weight(1f).testTag("layer-slider-$label"), valueRange = range, onValueChangeFinished = onDone, colors = SliderDefaults.colors(
             thumbColor = ClioColors.Clay, activeTrackColor = ClioColors.Clay, inactiveTrackColor = ClioColors.SurfaceHigh))
         Text(value, style = MaterialTheme.typography.labelSmall, color = ClioColors.TextTertiary, modifier = Modifier.width(44.dp))
     }
