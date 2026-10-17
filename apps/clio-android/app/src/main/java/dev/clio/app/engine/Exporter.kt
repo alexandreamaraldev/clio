@@ -79,15 +79,19 @@ class Exporter(private val context: Context) {
             // HDR + grades: MediaCodec tone-mapping (API 31+) first, then GPU tone-mapping (needs
             // GL_EXT_YUV_target, missing on some GPUs/emulators), then reading HDR as SDR (keeps grades,
             // flatter colours), then exporting without grades. Each failure retries automatically.
-            val plans = buildList { if (Build.VERSION.SDK_INT >= 31) add(HdrPlan.CODEC); if (Build.VERSION.SDK_INT >= 29) { add(HdrPlan.GL); add(HdrPlan.AS_SDR) }; add(HdrPlan.DROP) }
+            // Ungraded HDR projects keep HDR (one attempt, no tone-map).
+            val anyHdr = videoSources.any { HdrProbe.cached(it) == true }
+            val plans = if (!anyHdr || snap.grades.isEmpty()) listOf(HdrPlan.DROP)
+                else buildList { if (Build.VERSION.SDK_INT >= 31) add(HdrPlan.CODEC); if (Build.VERSION.SDK_INT >= 29) { add(HdrPlan.GL); add(HdrPlan.AS_SDR) }; add(HdrPlan.DROP) }
             for ((k, plan) in plans.withIndex()) {
                 hdrPlan = plan
                 sources.forEach { it.close() }; sources.clear()
                 val composition = buildComposition(snap, spec, captionStyle, sources)
                 try { withContext(Dispatchers.Main) { run(composition, out, onProgress) }; break }
                 catch (e: ExportException) {
-                    if (!toneMap && hdrPlan != HdrPlan.DROP) throw e
-                    if (k == plans.lastIndex) throw UserFacingExportError("Não foi possível exportar este vídeo HDR neste aparelho. Tente remover os filtros dos clipes.", e)
+                    if (!anyHdr) throw e
+                    // The last stage already exports without grades: say the device can't do this HDR video.
+                    if (k == plans.lastIndex) throw UserFacingExportError("Este aparelho não consegue exportar este vídeo HDR.", e)
                     android.util.Log.w("Clio", "HDR tone-map ($plan) failed, trying ${plans[k + 1]}", e)
                 }
             }
@@ -110,7 +114,8 @@ class Exporter(private val context: Context) {
         val graded = Grades.byClip(snap.grades)
         val anyHdr = video.any { !MediaKind.isImage(context, it.source) && HdrProbe.cached(it.source) == true }
         // Any HDR clip: convert the whole export to SDR (matches the SDR preview), grades or not.
-        toneMap = anyHdr && hdrPlan != HdrPlan.DROP
+        // Tone-map only when grades meet HDR (Media3's LUT is SDR-only); ungraded HDR stays HDR.
+        toneMap = anyHdr && graded.isNotEmpty() && hdrPlan != HdrPlan.DROP
         val dropGrades = anyHdr && graded.isNotEmpty() && !toneMap
         lastNotice = when {
             dropGrades -> "Vídeo HDR: os filtros foram ignorados nesta exportação (este aparelho não converte HDR para SDR)."

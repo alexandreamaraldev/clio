@@ -14,6 +14,10 @@
   MediaCodec (API 31+) → OpenGL (API 29+) → `HDR_MODE_EXPERIMENTAL_FORCE_INTERPRET_HDR_AS_SDR` (mantém o grade,
   cores do trecho HDR lavadas, com aviso) → sem grades (com aviso). Cada falha (`ExportException`) tenta a próxima;
   se todas falharem, erro em pt-BR ("Não foi possível exportar este vídeo HDR neste aparelho…"), sem crash.
+- Projetos HDR **sem** grade não são convertidos: exportam em HDR, numa única tentativa.
+- Prévia: uma fonte ainda não sondada conta como HDR (o LUT não roda nela até o `HdrProbe` responder).
+- Follow-up: **verificar a exportação HDR→SDR num aparelho físico** (o emulador do CI não decodifica HLG 10-bit nem tem
+  `GL_EXT_YUV_target`; lá só o caminho de erro é exercitado).
 - Detecção: `HdrProbe` (MediaExtractor, `KEY_COLOR_TRANSFER`) roda em background e guarda o resultado por URI.
 - Prévia: com algum clipe HDR na playlist o efeito de LUT não é instalado; aparece o aviso
   "Vídeo HDR: filtros e ajustes não aparecem na prévia…".
@@ -44,3 +48,10 @@
   Um stream de cinza perfeito codificado só com MediaCodec (sem GL) também é lido como 132,130,132 pelo
   `MediaMetadataRetriever` do emulador: o desvio é a conversão YUV→RGB do retriever. Testes de cor devem usar
   `Bt709Frame` (androidTest), que decodifica o Y'CbCr com a matriz BT.709 limitada.
+
+## Prévia de imagens
+- No Media3 1.4 o `PlayerView` mostra imagens por um `ImageView` (`ImageOutput`), fora do `VideoFrameProcessor`:
+  a prévia de stills já mostra os valores originais (cinza 128), então `WORKING_COLOR_SPACE_ORIGINAL` não se aplica
+  ao player (para vídeo SDR, DEFAULT e ORIGINAL são idênticos).
+- Consequência/follow-up: filtros em **imagens** não aparecem na prévia (aparecem na exportação). Corrigir exigiria
+  renderizar stills pelo pipeline de efeitos (Media3 1.5+/CompositionPlayer) ou graduar o bitmap no `ImageOutput`.

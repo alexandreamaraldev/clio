@@ -216,7 +216,7 @@ class ExportGradeE2ETest {
      * Outcome (b) contract, from Timeline's d1a5faf: the export sheet shows exactly one pt-BR sentence
      * (UserFacingExportError.message) in the node tagged "export_error"; the cause chain only goes to Log.
      */
-    private val HDR_ERROR = "Não foi possível exportar este vídeo HDR neste aparelho. Tente remover os filtros dos clipes."
+    private val HDR_ERROR = "Este aparelho não consegue exportar este vídeo HDR."
 
     private fun assertPtBrHdrError(msg: String, label: String) {
         assertEquals("$label: ExportState.Failed message", HDR_ERROR, msg)

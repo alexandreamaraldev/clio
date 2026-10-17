@@ -99,6 +99,7 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
     private var lastRedrawMs = 0L
     private var hdrInPlaylist = false
     private var lastPlanKey: Any? = null
+    private fun vids(): List<String> { val app = getApplication<Application>(); return videoClips.map { it.source }.filter { !MediaKind.isImage(app, it) } }
     private val bakeJob = viewModelScope.launch {
         bakeRequests.collect {
             val clips = videoClips; val gs = grades; val draft = gradeDraft
@@ -257,7 +258,8 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
         val app = getApplication<Application>()
         // Media3 1.4's LUT shader is SDR-only: with an HDR clip in the playlist the grade is not previewed.
         val vids = videoClips.map { it.source }.filter { !MediaKind.isImage(app, it) }
-        hdrInPlaylist = vids.any { HdrProbe.cached(it) == true }
+        // Not probed yet counts as HDR, so the SDR-only LUT never runs on an HDR source.
+        hdrInPlaylist = vids.any { HdrProbe.cached(it) != false }
         // Unknown URIs are probed in the background, then the effects are re-synced.
         if (vids.any { HdrProbe.cached(it) == null }) viewModelScope.launch { if (HdrProbe.prefetch(app, vids)) redrawPaused() }
         val g = !hdrInPlaylist && (gradeDraft != null || videoClips.any { grades.containsKey(it.id.toLong()) })
@@ -272,7 +274,7 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
     /** Re-bakes (off the main thread) and re-renders the paused frame so a new grade shows. */
     private fun redrawPaused() {
         syncPreviewEffects()
-        if (hdrInPlaylist && (gradeDraft != null || grades.isNotEmpty())) ui = ui.copy(notice = HdrProbe.PREVIEW_NOTICE)
+        if (vids().any { HdrProbe.cached(it) == true } && (gradeDraft != null || grades.isNotEmpty())) ui = ui.copy(notice = HdrProbe.PREVIEW_NOTICE)
     }
 
     /** Playlist source µs of item [idx] at source offset [srcMs] (what GradeSchedule counts in). */
