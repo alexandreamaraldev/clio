@@ -134,7 +134,8 @@ class Exporter(private val context: Context) {
         val items = video.mapIndexed { index, c ->
             val isImage = MediaKind.isImage(context, c.source)
             val speed = if (isImage) 1f else c.speed
-            val curve = if (isImage) null else curveMap(c)?.exportEffects()
+            val curveMap = if (isImage) null else curveMap(c)
+            val curve = curveMap?.exportEffects()
             val mi = MediaItem.Builder().setUri(c.source).apply {
                 if (!isImage) setClippingConfiguration(MediaItem.ClippingConfiguration.Builder()
                     .setStartPositionMs(c.inMs.toLong()).setEndPositionMs(c.inMs.toLong() + Mix.spanMs(c.durationMs.toLong(), speed)).build())
@@ -145,9 +146,10 @@ class Exporter(private val context: Context) {
                 .map { Layers.LayerOverlay(sources.getValue(it.id), it, c.startMs.toLong(), spec.width, spec.height) }
             val incoming = Layers.incoming(video, index)
             val video = mutableListOf<androidx.media3.common.Effect>()
-            // A speed curve retimes each frame (slow parts hold frames longer; no frame blending).
-            if (curve != null) video += curve.first else if (speed != 1f) video += SpeedChangeEffect(speed)
-            if (!isImage && frameDrop && FpsCap.needed(FpsCap.sourceFps(context, Uri.parse(c.source), c.inMs.toLong() * 1000), spec.fps.toFloat(), (if (curve != null) curveMap(c)?.maxSpeed else null) ?: speed)) video += FpsCap(spec.fps.toFloat(), smooth = curve != null)
+            // A speed curve retimes frames onto the output grid (fast parts drop, slow parts repeat frames;
+            // no blending) and lasts exactly the engine's clip duration.
+            if (curveMap != null) video += CurveRetime(curveMap, spec.fps.toFloat()) else if (speed != 1f) video += SpeedChangeEffect(speed)
+            if (curveMap == null && !isImage && frameDrop && FpsCap.needed(FpsCap.sourceFps(context, Uri.parse(c.source), c.inMs.toLong() * 1000), spec.fps.toFloat(), (if (curve != null) curveMap(c)?.maxSpeed else null) ?: speed)) video += FpsCap(spec.fps.toFloat(), smooth = curve != null)
             video += Presentation.createForWidthAndHeight(spec.width, spec.height,
                 if (snap.fill) Presentation.LAYOUT_SCALE_TO_FIT_WITH_CROP else Presentation.LAYOUT_SCALE_TO_FIT)
             // Blurred background: a pre-blurred still of the clip fills the letterbox bars (the centre is
