@@ -639,10 +639,6 @@ mod qa_tests {
         for k in 1..history.len() { assert!(p.redo()); assert_eq!((p.snapshot().speed_curves.first().map(|c| c.curve.clone()), p.tracks()[0].clips[0].duration_ms), history[k]); }
     }
 
-    /// KNOWN BUG (PR #6, split reshapes curves): `State::sub` rebuilds each half from the original
-    /// points plus interpolated endpoints, so the Hermite tangents change and `curve_segments`
-    /// rescales the result; Herói split at 1/3 plays up to ~12 % off the original speed.
-    /// Strict on purpose (2 %); fails until split keeps the original curve shape.
     /// After a split each half should still play the original curve: its own plan's speeds must
     /// match the original curve at the same source position (no reshaping or rescaling).
     #[test]
