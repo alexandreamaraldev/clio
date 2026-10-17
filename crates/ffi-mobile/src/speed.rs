@@ -34,14 +34,6 @@ pub struct SpeedCurve {
 }
 fn one() -> f32 { 1.0 }
 
-/// Curved clip lengths are snapped to whole 30 fps frames (also whole frames at 60 fps), so the
-/// timeline, music/voice-over placement and the export's frame count agree instead of each curved
-/// clip drifting by up to a frame. At least `min` ms.
-pub(crate) fn snap_to_frames(ms: f64, min: u64) -> u64 {
-    let frames = (ms * 30.0 / 1000.0).round().max(1.0);
-    ((frames * 1000.0 / 30.0).round() as u64).max(min)
-}
-
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
 pub struct ClipSpeedCurve {
     pub clip_id: u64,
@@ -248,7 +240,7 @@ impl State {
         let new_span = (b - a).round() as u64;
         let x = &mut self.tracks[ti].clips[ci];
         x.in_ms = (c.in_ms as f64 + a).round() as u64;
-        x.duration_ms = snap_to_frames(new_span as f64 / sub.mean_speed(), 1);
+        x.duration_ms = ((new_span as f64 / sub.mean_speed()).round() as u64).max(1);
         x.speed = (new_span as f64 / x.duration_ms as f64) as f32;
         x.fade_in_ms = x.fade_in_ms.min(x.duration_ms);
         x.fade_out_ms = x.fade_out_ms.min(x.duration_ms - x.fade_in_ms);
@@ -278,7 +270,7 @@ impl ClioProject {
         let mean = curve.mean_speed();
         s.checkpoint();
         let x = &mut s.tracks[ti].clips[ci];
-        x.duration_ms = snap_to_frames(span as f64 / mean, MIN_CLIP_MS.min(span.max(1)));
+        x.duration_ms = ((span as f64 / mean).round() as u64).max(MIN_CLIP_MS.min(span.max(1)));
         x.speed = (span as f64 / x.duration_ms as f64) as f32;
         x.fade_in_ms = x.fade_in_ms.min(x.duration_ms);
         x.fade_out_ms = x.fade_out_ms.min(x.duration_ms - x.fade_in_ms);
@@ -366,9 +358,7 @@ mod tests {
         p.set_speed_preset(a, "heroi".into()).unwrap();
         let c = clip(&p, a);
         let mean = curve(&p, a).unwrap().mean_speed();
-        assert_eq!(c.duration_ms, snap_to_frames(span as f64 / mean, 1));
-        let f = c.duration_ms as f64 * 30.0 / 1000.0;
-        assert!((f - f.round()).abs() < 0.04, "on the 30 fps grid: {}", c.duration_ms);
+        assert_eq!(c.duration_ms, (span as f64 / mean).round() as u64);
         assert!(c.duration_ms > span, "hero slows down overall");
         let segs = curve_segments(curve(&p, a).unwrap(), span, c.duration_ms);
         assert!((timeline_ms(&segs, span) - c.duration_ms as f64).abs() < 1.0);
@@ -597,16 +587,15 @@ mod qa_tests {
                 let r = pts(&c);
                 let want = integral_ms(|x| ref_speed(&r, x), span as f64);
                 // 48-segment midpoint plan vs the exact integral: within 1 ms + 0.1 % (sharp custom
-                // curves reach ~0.05 %: 37 ms on 60 s of source), plus up to half a 30 fps frame since
-                // curved durations are snapped to the frame grid (review on #6).
-                assert!((got - want).abs() <= 1.0 + 1000.0 / 60.0 + 1e-3 * want, "{} span {span}: clip {got} ms vs ∫ {want:.2} ms", c.preset);
+                // curves reach ~0.05 %: 37 ms on 60 s of source).
+                assert!((got - want).abs() <= 1.0 + 1e-3 * want, "{} span {span}: clip {got} ms vs ∫ {want:.2} ms", c.preset);
                 // The playback plan fills that duration and its speeds follow the curve (k ≈ 1).
                 let segs = curve_segments(c.clone(), span, got as u64);
                 let plan: f64 = segs.iter().map(|s| span as f64 / segs.len() as f64 / s.speed as f64).sum();
                 assert!((plan - got).abs() < 1.0, "{} plan {plan} vs {got}", c.preset);
                 for (i, s) in segs.iter().enumerate() {
                     let x = (i as f64 + 0.5) / segs.len() as f64;
-                    assert!((s.speed as f64 / ref_speed(&r, x) - 1.0).abs() < 2e-3 + (got - want).abs() / want, "{} seg {i}: {} vs {}", c.preset, s.speed, ref_speed(&r, x));
+                    assert!((s.speed as f64 / ref_speed(&r, x) - 1.0).abs() < 2e-3, "{} seg {i}: {} vs {}", c.preset, s.speed, ref_speed(&r, x));
                 }
             }
         }
@@ -639,6 +628,10 @@ mod qa_tests {
         for k in 1..history.len() { assert!(p.redo()); assert_eq!((p.snapshot().speed_curves.first().map(|c| c.curve.clone()), p.tracks()[0].clips[0].duration_ms), history[k]); }
     }
 
+    /// KNOWN BUG (PR #6, split reshapes curves): `State::sub` rebuilds each half from the original
+    /// points plus interpolated endpoints, so the Hermite tangents change and `curve_segments`
+    /// rescales the result; Herói split at 1/3 plays up to ~12 % off the original speed.
+    /// Strict on purpose (2 %); fails until split keeps the original curve shape.
     /// After a split each half should still play the original curve: its own plan's speeds must
     /// match the original curve at the same source position (no reshaping or rescaling).
     #[test]

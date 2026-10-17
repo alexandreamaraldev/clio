@@ -18,8 +18,7 @@
   vizinhos ou interpolação óptica; gravar em 60/120 fps ajuda.
 - Curvas só em vídeos da trilha principal, com áudio não destacado.
 
-## Frame grid
-Curved clip lengths are snapped by the engine to whole 30 fps frames (also whole frames at 60 fps),
-so timeline, music/voice-over and export agree and per-clip rounding does not add up. At 24/25 fps
-exports a curved clip can still be off by under one frame of that rate. A split keeps the user's
-cut point (not snapped).
+## Frame grid (open)
+Snapping curved durations to a 30 fps grid was tried (8e2be69) and reverted: the QA contract is
+timeline = ∫ within 5 ms, and the flash_in cut got worse (31 ms early instead of 23). The remaining
+drift is on the export side (export ~23 ms shorter than the engine per curved clip), to be fixed there.
