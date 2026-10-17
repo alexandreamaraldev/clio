@@ -19,6 +19,8 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.CustomAccessibilityAction
+import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import dev.clio.app.ui.components.rememberHaptics
@@ -55,11 +57,23 @@ fun SpeedCurveSection(preset: String?, points: List<Pair<Float, Float>>, speedAt
     Spacer(Modifier.height(Space.sm))
     var live by remember(points) { mutableStateOf(points.ifEmpty { listOf(0f to 1f, 1f to 1f) }) }
     var drag by remember { mutableIntStateOf(-1) }
+    var sel by remember(points) { mutableIntStateOf(0) } // point moved by accessibility actions
     val press by animateFloatAsState(if (drag >= 0) 1f else 0f, ClioMotion.snappy(), label = "p")
     val accent = ClioColors.Clay
     val line = ClioColors.Hairline
     Box(Modifier.fillMaxWidth().height(96.dp).clip(ClioShapes.sm).background(ClioColors.SurfaceHigh)
-        .testTag("speed-curve").semantics { contentDescription = "Curva de velocidade, ${live.size} pontos" }
+        .testTag("speed-curve").semantics {
+            val (sx, ss) = live[sel.coerceIn(0, live.lastIndex)]
+            contentDescription = "Curva de velocidade, ${live.size} pontos; ponto ${sel + 1} em ${(sx * 100).toInt()}%, ${fmtSpeed(snapSpeed(ss))}"
+            fun nudge(f: Float): Boolean { val i = sel.coerceIn(0, live.lastIndex); val (x, sp) = live[i]
+                live = live.toMutableList().also { it[i] = x to (sp * f).coerceIn(0.1f, 10f) }; onCurve(live); return true }
+            customActions = listOf(
+                CustomAccessibilityAction("Próximo ponto") { sel = (sel + 1) % live.size; true },
+                CustomAccessibilityAction("Ponto anterior") { sel = (sel - 1 + live.size) % live.size; true },
+                CustomAccessibilityAction("Mais rápido") { nudge(1.25f) },
+                CustomAccessibilityAction("Mais lento") { nudge(0.8f) },
+            )
+        }
         .pointerInput(points) {
             fun hit(o: Offset): Int = live.indices.minByOrNull { i -> val (x, s) = live[i]; abs(x * size.width - o.x) + abs(speedToY(s) * size.height - o.y) }
                 ?.takeIf { i -> val (x, s) = live[i]; abs(x * size.width - o.x) < 48f && abs(speedToY(s) * size.height - o.y) < 64f } ?: -1

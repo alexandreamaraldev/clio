@@ -376,8 +376,13 @@ impl ClioProject {
                 x.start_ms = out.saturating_sub(dur);
             }
         }
-        x.in_ms = in_ms;
-        x.duration_ms = dur;
+        if s.speed_curves.contains_key(&clip_id) {
+            s.trim_curved(ti, ci, in_ms, dur);
+        } else {
+            let x = &mut s.tracks[ti].clips[ci];
+            x.in_ms = in_ms;
+            x.duration_ms = dur;
+        }
         s.relayout(ti);
         Ok(())
     }

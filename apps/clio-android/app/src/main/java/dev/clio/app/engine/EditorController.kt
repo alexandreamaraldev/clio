@@ -180,6 +180,7 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
             }.build()
         })
         player.prepare()
+        scheduleCurveMessages(clips)
         audio.setClips(audio.clipsOf(s))
         applyItemParams()
         if (clips.isNotEmpty()) seekTimeline(playheadState.floatValue.coerceAtMost(ui.durationS))
@@ -190,7 +191,6 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
         val idx = player.currentMediaItemIndex
         val c = videoClips.getOrNull(idx)
         val local = localOf(c, player.currentPosition)
-        if (c != null && speedMaps.containsKey(c.id.toLong())) applyItemParams()
         playheadState.floatValue = (clipStarts.getOrElse(idx) { 0L } + local) / 1000f
         updateLook(idx, local)
         if (c != null) player.volume = AudioGain.preview(AudioGain.at(c, local))
@@ -199,11 +199,34 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
     }
 
     /** Per-clip speed/volume for whichever item ExoPlayer is on (it has one global setting). */
+    /**
+     * Curves on preview: one PlayerMessage per speed change at its exact media position (playback
+     * thread), so changes land by presentation time, not on the UI tick. Curved clips change pitch
+     * with speed, exactly like the export (Media3's variable-speed audio is pitch-coupled).
+     */
+    private val curveMessages = mutableListOf<androidx.media3.exoplayer.PlayerMessage>()
+    private fun setPlaybackSpeed(speed: Float, curved: Boolean) {
+        val pitch = if (curved) speed else 1f
+        val cur = player.playbackParameters
+        if (abs(cur.speed - speed) > 0.002f * speed || abs(cur.pitch - pitch) > 0.002f) player.playbackParameters = PlaybackParameters(speed, pitch)
+    }
+    private fun scheduleCurveMessages(clips: List<uniffi.clio_ffi.Clip>) {
+        curveMessages.forEach { it.cancel() }; curveMessages.clear()
+        clips.forEachIndexed { idx, c ->
+            val m = speedMaps[c.id.toLong()] ?: return@forEachIndexed
+            for (srcMs in m.changesSrcMs) {
+                val speed = m.speedAtSource(srcMs.toDouble())
+                curveMessages += player.createMessage { _, _ -> setPlaybackSpeed(speed, curved = true) }
+                    .setLooper(android.os.Looper.getMainLooper()).setPosition(idx, srcMs).setDeleteAfterDelivery(false).send()
+            }
+        }
+    }
+
     private fun applyItemParams() {
         val c = videoClips.getOrNull(player.currentMediaItemIndex) ?: return
         // Curves: the current segment's speed (pitch is kept by ExoPlayer's Sonic, pitch = 1).
-        val want = speedMaps[c.id.toLong()]?.speedAtSource(player.currentPosition.toDouble()) ?: c.speed
-        if (abs(player.playbackParameters.speed - want) > 0.005f * want) player.playbackParameters = PlaybackParameters(want)
+        val m = speedMaps[c.id.toLong()]
+        setPlaybackSpeed(m?.speedAtSource(player.currentPosition.toDouble()) ?: c.speed, curved = m != null)
         player.volume = if (AudioGain.silent(c)) 0f else AudioGain.preview(c.volume)
     }
 
@@ -330,10 +353,15 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
     override fun duplicate(clipId: Long?) = launchEdit(rebuildPlayer = true) { target(clipId)?.let { runCatching { duplicateClip(it) } } }.let { }
     override fun setSpeedPreset(clipId: Long?, preset: String?) = launchEdit(rebuildPlayer = true) {
         target(clipId)?.let { id -> runCatching { if (preset == null) clearSpeedCurve(id) else setSpeedPreset(id, preset) } }
-    }.let { }
+    }.also { if (preset != null) curveAudioNotice(clipId) }.let { }
+    /** Short pt-BR heads-up the first time a clip with sound gets a curve. */
+    private fun curveAudioNotice(clipId: Long?) {
+        val c = videoClips.firstOrNull { it.id.toLong() == clipId } ?: videoClips.firstOrNull() ?: return
+        if (!c.muted && c.volume > 0f && !speedMaps.containsKey(c.id.toLong())) ui = ui.copy(notice = "Curva de velocidade: o som acompanha a velocidade (o tom muda junto).")
+    }
     override fun setSpeedCurve(clipId: Long?, points: List<Pair<Float, Float>>) = launchEdit(rebuildPlayer = true) {
         target(clipId)?.let { id -> runCatching { setSpeedCurve(id, uniffi.clio_ffi.SpeedCurve("personalizado", points.map { uniffi.clio_ffi.SpeedPoint(it.first, it.second) })) } }
-    }.let { }
+    }.also { curveAudioNotice(clipId) }.let { }
     override fun curveSpeedAt(points: List<Pair<Float, Float>>, x: Float): Float =
         runCatching { uniffi.clio_ffi.curveSpeedAt(uniffi.clio_ffi.SpeedCurve("personalizado", points.map { uniffi.clio_ffi.SpeedPoint(it.first, it.second) }), x) }.getOrDefault(1f)
     override fun setSpeed(clipId: Long?, speed: Float) = launchEdit(rebuildPlayer = true) { target(clipId)?.let { runCatching { setClipSpeed(it, speed) } } }.let { }

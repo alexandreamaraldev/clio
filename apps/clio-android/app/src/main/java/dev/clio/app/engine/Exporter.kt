@@ -92,7 +92,7 @@ class Exporter(private val context: Context) {
         val items = video.mapIndexed { index, c ->
             val isImage = MediaKind.isImage(context, c.source)
             val speed = if (isImage) 1f else c.speed
-            val curve = if (isImage) null else curveMap(c)
+            val curve = if (isImage) null else curveMap(c)?.exportEffects()
             val mi = MediaItem.Builder().setUri(c.source).apply {
                 if (!isImage) setClippingConfiguration(MediaItem.ClippingConfiguration.Builder()
                     .setStartPositionMs(c.inMs.toLong()).setEndPositionMs(c.inMs.toLong() + Mix.spanMs(c.durationMs.toLong(), speed)).build())
@@ -104,8 +104,8 @@ class Exporter(private val context: Context) {
             val incoming = Layers.incoming(video, index)
             val video = mutableListOf<androidx.media3.common.Effect>()
             // A speed curve retimes each frame (slow parts hold frames longer; no frame blending).
-            if (curve != null) video += curve.videoEffect() else if (speed != 1f) video += SpeedChangeEffect(speed)
-            if (!isImage && frameDrop && FpsCap.needed(FpsCap.sourceFps(context, Uri.parse(c.source), c.inMs.toLong() * 1000), spec.fps.toFloat(), curve?.maxSpeed ?: speed)) video += FpsCap(spec.fps.toFloat())
+            if (curve != null) video += curve.first else if (speed != 1f) video += SpeedChangeEffect(speed)
+            if (!isImage && frameDrop && FpsCap.needed(FpsCap.sourceFps(context, Uri.parse(c.source), c.inMs.toLong() * 1000), spec.fps.toFloat(), (if (curve != null) curveMap(c)?.maxSpeed else null) ?: speed)) video += FpsCap(spec.fps.toFloat())
             video += Presentation.createForWidthAndHeight(spec.width, spec.height,
                 if (snap.fill) Presentation.LAYOUT_SCALE_TO_FIT_WITH_CROP else Presentation.LAYOUT_SCALE_TO_FIT)
             // Blurred background: a pre-blurred still of the clip fills the letterbox bars (the centre is
@@ -121,7 +121,7 @@ class Exporter(private val context: Context) {
             video += OverlayEffect(ImmutableList.copyOf(overlays))
             EditedMediaItem.Builder(mi)
                 .apply { if (isImage) { setDurationUs(c.durationMs.toLong() * 1000); setFrameRate(spec.fps) } }
-                .setEffects(Effects(audioChain(c, speed), video))
+                .setEffects(Effects(if (curve != null) audioChain(c, speed, curve.second) else audioChain(c, speed), video))
                 .build()
         }
         val seqs = mutableListOf(EditedMediaItemSequence(items))
@@ -187,9 +187,8 @@ class Exporter(private val context: Context) {
     private var curveOf: Map<ULong, uniffi.clio_ffi.SpeedCurve> = emptyMap()
     private fun curveMap(c: uniffi.clio_ffi.Clip): SpeedMap? = curveOf[c.id]?.let { SpeedMap.of(it, Mix.spanMs(c.durationMs.toLong(), c.speed), c.durationMs.toLong()) }
 
-    private fun audioChain(c: uniffi.clio_ffi.Clip, speed: Float): List<AudioProcessor> = buildList {
-        val curve = curveMap(c)
-        if (curve != null) add(curve.audioProcessor())
+    private fun audioChain(c: uniffi.clio_ffi.Clip, speed: Float, curveAudio: AudioProcessor? = null): List<AudioProcessor> = buildList {
+        if (curveAudio != null) add(curveAudio)
         else if (speed != 1f) add(SonicAudioProcessor().apply { setSpeed(speed); setPitch(1f) })
         if (AudioGain.silent(c) || c.volume != 1f || c.fadeInMs > 0u || c.fadeOutMs > 0u)
             add(GainProcessor(c.durationMs.toLong(), c.volume, c.fadeInMs.toLong(), c.fadeOutMs.toLong(), AudioGain.silent(c)))

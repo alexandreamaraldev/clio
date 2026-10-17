@@ -4,7 +4,6 @@ import androidx.annotation.OptIn
 import androidx.media3.common.audio.SpeedChangingAudioProcessor
 import androidx.media3.common.audio.SpeedProvider
 import androidx.media3.common.util.UnstableApi
-import androidx.media3.effect.TimestampAdjustment
 import uniffi.clio_ffi.SpeedCurve
 import uniffi.clio_ffi.curveSegments
 
@@ -40,21 +39,18 @@ class SpeedMap(srcStartsMs: List<Long>, speeds: List<Float>, private val spanMs:
     }
 
     /**
-     * Export: retimes video frames by the curve. Frame timestamps may carry the sequence offset of
-     * earlier items, so the first frame defines the clip origin; the offset is kept on output.
+     * Export: one provider shared by the video SpeedChangeEffect and the audio processor of an item,
+     * so both follow the same plan; SpeedChangeEffect also reports the item's new duration to the
+     * sequence (getDurationAfterEffectApplied), so later items start at the right time.
      */
     @OptIn(UnstableApi::class)
-    fun videoEffect(): TimestampAdjustment {
-        var origin = Long.MIN_VALUE
-        return TimestampAdjustment { inUs, out ->
-            if (origin == Long.MIN_VALUE) origin = inUs
-            out.onTimestamp(origin + (timelineAt((inUs - origin) / 1000.0) * 1000).toLong())
-        }
+    fun exportEffects(): Pair<androidx.media3.effect.SpeedChangeEffect, SpeedChangingAudioProcessor> {
+        val p = provider()
+        return androidx.media3.effect.SpeedChangeEffect(p) to SpeedChangingAudioProcessor(p)
     }
 
-    /** Export audio: Media3 1.4's only variable-speed processor; pitch follows speed (see docs). */
-    @OptIn(UnstableApi::class)
-    fun audioProcessor() = SpeedChangingAudioProcessor(provider())
+    /** Source ms of every speed change (segment starts after the first), for preview scheduling. */
+    val changesSrcMs: List<Long> get() = src.drop(1)
 
     companion object {
         fun of(curve: SpeedCurve, spanMs: Long, durationMs: Long): SpeedMap {
