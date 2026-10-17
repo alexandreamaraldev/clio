@@ -17,6 +17,7 @@ import androidx.media3.exoplayer.ExoPlayer
 import dev.clio.app.ClioApp
 import dev.clio.app.ui.screens.*
 import kotlinx.coroutines.*
+import kotlin.math.abs
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import uniffi.clio_ffi.Caption
@@ -102,6 +103,10 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
     private val voice = VoiceoverRecorder(app)
     private var voiceStartMs = 0L
     private var clipStarts: LongArray = LongArray(0)
+    /** Speed curves of main clips by id: source <-> timeline mapping and per-segment preview speed. */
+    private var speedMaps: Map<Long, SpeedMap> = emptyMap()
+    private fun localOf(c: uniffi.clio_ffi.Clip?, srcMs: Long): Long = c?.let { speedMaps[it.id.toLong()] }?.timelineAt(srcMs.toDouble())?.toLong() ?: (srcMs / (c?.speed ?: 1f)).toLong()
+    private fun srcOf(c: uniffi.clio_ffi.Clip?, localMs: Long): Long = c?.let { speedMaps[it.id.toLong()] }?.sourceAt(localMs.toDouble())?.toLong() ?: Mix.spanMs(localMs, c?.speed ?: 1f)
     private var videoClips: List<uniffi.clio_ffi.Clip> = emptyList()
     private var saveJob: Job? = null
     private var captionJob: Job? = null
@@ -139,10 +144,13 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
         viewModelScope.launch { apply(edit(block = block), rebuildPlayer) }
 
     private fun apply(s: Snapshot, rebuildPlayer: Boolean) {
+        val curves = s.speedCurves.associate { it.clipId to it.curve }
+        speedMaps = s.tracks.flatMap { it.clips }.mapNotNull { c -> curves[c.id]?.let { c.id.toLong() to SpeedMap.of(it, Mix.spanMs(c.durationMs.toLong(), c.speed), c.durationMs.toLong()) } }.toMap()
         val uiTracks = s.tracks.filter { it.clips.isNotEmpty() || it.kind == TrackKind.VIDEO }.map { t ->
             UiTrack(t.name, when (t.kind) { TrackKind.VIDEO -> "video"; TrackKind.AUDIO -> "audio"; TrackKind.TEXT -> "text"; TrackKind.EFFECT -> "fx"; TrackKind.OVERLAY -> "overlay" },
                 t.clips.map { c -> UiClip(c.name, c.startMs.toFloat() / 1000f, c.durationMs.toFloat() / 1000f, c.id.toLong(), c.source, c.inMs.toFloat() / 1000f,
-                    c.sourceMs.toFloat() / 1000f, c.speed, c.volume, c.fadeInMs.toFloat() / 1000f, c.fadeOutMs.toFloat() / 1000f, c.muted, detached = c.detachedTo != null) })
+                    c.sourceMs.toFloat() / 1000f, c.speed, c.volume, c.fadeInMs.toFloat() / 1000f, c.fadeOutMs.toFloat() / 1000f, c.muted, detached = c.detachedTo != null,
+                    speedPreset = curves[c.id]?.preset, speedPoints = curves[c.id]?.points?.map { it.x to it.speed }.orEmpty()) })
         }
         val caps = s.captions.map { Engine.Cap(it.startMs.toLong(), it.endMs.toLong(), it.text, it.words) }
         val withCaps = if (caps.isEmpty()) uiTracks else uiTracks + UiTrack("Legendas", "text",
@@ -181,7 +189,8 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
     fun syncPlayhead() {
         val idx = player.currentMediaItemIndex
         val c = videoClips.getOrNull(idx)
-        val local = (player.currentPosition / (c?.speed ?: 1f)).toLong()
+        val local = localOf(c, player.currentPosition)
+        if (c != null && speedMaps.containsKey(c.id.toLong())) applyItemParams()
         playheadState.floatValue = (clipStarts.getOrElse(idx) { 0L } + local) / 1000f
         updateLook(idx, local)
         if (c != null) player.volume = AudioGain.preview(AudioGain.at(c, local))
@@ -192,7 +201,9 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
     /** Per-clip speed/volume for whichever item ExoPlayer is on (it has one global setting). */
     private fun applyItemParams() {
         val c = videoClips.getOrNull(player.currentMediaItemIndex) ?: return
-        if (player.playbackParameters.speed != c.speed) player.playbackParameters = PlaybackParameters(c.speed)
+        // Curves: the current segment's speed (pitch is kept by ExoPlayer's Sonic, pitch = 1).
+        val want = speedMaps[c.id.toLong()]?.speedAtSource(player.currentPosition.toDouble()) ?: c.speed
+        if (abs(player.playbackParameters.speed - want) > 0.005f * want) player.playbackParameters = PlaybackParameters(want)
         player.volume = if (AudioGain.silent(c)) 0f else AudioGain.preview(c.volume)
     }
 
@@ -219,7 +230,7 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
     private fun seekTimeline(s: Float) {
         val ms = (s * 1000).toLong()
         val idx = clipStarts.indexOfLast { it <= ms }.coerceAtLeast(0)
-        if (clipStarts.isNotEmpty()) player.seekTo(idx, Mix.spanMs(ms - clipStarts[idx], videoClips.getOrNull(idx)?.speed ?: 1f))
+        if (clipStarts.isNotEmpty()) player.seekTo(idx, srcOf(videoClips.getOrNull(idx), ms - clipStarts[idx]))
         applyItemParams()
         playheadState.floatValue = s
         if (clipStarts.isNotEmpty()) updateLook(idx, ms - clipStarts[idx])
@@ -317,6 +328,14 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
     }.let { }
     override fun move(clipId: Long, toIndex: Int) = launchEdit(rebuildPlayer = true) { runCatching { moveClip(clipId.toULong(), toIndex.coerceAtLeast(0).toUInt()) } }.let { }
     override fun duplicate(clipId: Long?) = launchEdit(rebuildPlayer = true) { target(clipId)?.let { runCatching { duplicateClip(it) } } }.let { }
+    override fun setSpeedPreset(clipId: Long?, preset: String?) = launchEdit(rebuildPlayer = true) {
+        target(clipId)?.let { id -> runCatching { if (preset == null) clearSpeedCurve(id) else setSpeedPreset(id, preset) } }
+    }.let { }
+    override fun setSpeedCurve(clipId: Long?, points: List<Pair<Float, Float>>) = launchEdit(rebuildPlayer = true) {
+        target(clipId)?.let { id -> runCatching { setSpeedCurve(id, uniffi.clio_ffi.SpeedCurve("personalizado", points.map { uniffi.clio_ffi.SpeedPoint(it.first, it.second) })) } }
+    }.let { }
+    override fun curveSpeedAt(points: List<Pair<Float, Float>>, x: Float): Float =
+        runCatching { uniffi.clio_ffi.curveSpeedAt(uniffi.clio_ffi.SpeedCurve("personalizado", points.map { uniffi.clio_ffi.SpeedPoint(it.first, it.second) }), x) }.getOrDefault(1f)
     override fun setSpeed(clipId: Long?, speed: Float) = launchEdit(rebuildPlayer = true) { target(clipId)?.let { runCatching { setClipSpeed(it, speed) } } }.let { }
     override fun setAudio(clipId: Long?, volume: Float, fadeInS: Float, fadeOutS: Float, muted: Boolean) = launchEdit(rebuildPlayer = false) {
         target(clipId)?.let { runCatching { setClipAudio(it, volume, (fadeInS * 1000).toLong().toULong(), (fadeOutS * 1000).toLong().toULong(), muted) } }

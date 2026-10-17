@@ -58,10 +58,23 @@ private fun NoClip() = Box(Modifier.fillMaxWidth().height(160.dp), contentAlignm
 
 /** Constant speed 0.1x–10x on a log scale, with quick presets. */
 @Composable
-fun SpeedPanel(clip: UiClip?, onSpeed: (Float) -> Unit) {
-    Column(Modifier.fillMaxWidth().height(220.dp).padding(horizontal = Space.md)) {
+fun SpeedPanel(clip: UiClip?, onSpeed: (Float) -> Unit, onPreset: (String?) -> Unit = {}, onCurve: (List<Pair<Float, Float>>) -> Unit = {},
+               speedAt: (List<Pair<Float, Float>>, Float) -> Float = { p, _ -> p.firstOrNull()?.second ?: 1f }) {
+    Column(Modifier.fillMaxWidth().height(248.dp).padding(horizontal = Space.md)) {
         if (clip == null) { PanelTitle("Velocidade", ""); NoClip(); return@Column }
         val haptics = rememberHaptics()
+        var curveMode by remember(clip.id) { mutableStateOf(clip.speedPreset != null) }
+        Row(horizontalArrangement = Arrangement.spacedBy(Space.sm)) {
+            Choice("Constante", !curveMode, Modifier.testTag("speed-mode-constant")) { curveMode = false }
+            Choice("Curva", curveMode, Modifier.testTag("speed-mode-curve")) { curveMode = true }
+        }
+        Spacer(Modifier.height(Space.sm))
+        if (curveMode) {
+            PanelTitle("Curva", "média ${fmtSpeed(snapSpeed(clip.speed))} · ${"%.1f".format(clip.lenS).replace('.', ',')} s")
+            Spacer(Modifier.height(Space.sm))
+            SpeedCurveSection(clip.speedPreset, clip.speedPoints, speedAt, onPreset, onCurve)
+            return@Column
+        }
         var pos by remember(clip.id, clip.speed) { mutableFloatStateOf(((log10(clip.speed) + 1f) / 2f).coerceIn(0f, 1f)) }
         val speed = snapSpeed(10f.pow(pos * 2f - 1f))
         PanelTitle("Velocidade", "${fmtSpeed(speed)} · ${"%.1f".format(clip.lenS * clip.speed / speed).replace('.', ',')} s")

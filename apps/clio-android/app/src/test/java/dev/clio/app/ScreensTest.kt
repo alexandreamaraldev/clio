@@ -35,6 +35,11 @@ class ScreensTest {
         EditorScreen(ui(caps).copy(texts = listOf(TextItem(1, "Olá, São Paulo!", 2000, 5000, st))), { 3.0f }, initialTool = TOOL_TEXT)
     }
     @Test fun editorSpeed() = shot(ThemeMode.Dark) { EditorScreen(ui(), { 2.4f }, initialTool = TOOL_SPEED) }
+    @Test fun speedCurvePanel() = shot(ThemeMode.Dark) {
+        SpeedPanel(UiClip("a", 0f, 6.2f, 1L, speed = 0.65f, speedPreset = "bala", speedPoints = listOf(0f to 2f, 0.45f to 0.15f, 0.55f to 0.15f, 1f to 2f)), {},
+            speedAt = { p, x -> val i = p.indexOfLast { it.first <= x }.coerceIn(0, p.size - 2); val (x0, s0) = p[i]; val (x1, s1) = p[i + 1]
+                (kotlin.math.ln(s0) + (kotlin.math.ln(s1) - kotlin.math.ln(s0)) * ((x - x0) / (x1 - x0)).coerceIn(0f, 1f)).let { kotlin.math.exp(it) } })
+    }
     @Test fun editorVolume() = shot(ThemeMode.Light) { EditorScreen(ui(), { 2.4f }, initialTool = TOOL_VOLUME) }
     @Test fun editorFormat() = shot(ThemeMode.Dark) { EditorScreen(ui().copy(canvasW = 1080, canvasH = 1080, blurBg = true), { 2.4f }, initialTool = TOOL_FORMAT) }
     @Test fun editorMusic() = shot(ThemeMode.Light) { EditorScreen(ui().copy(music = "Lo-fi morning"), { 2.4f }, initialTool = TOOL_MUSIC) }
