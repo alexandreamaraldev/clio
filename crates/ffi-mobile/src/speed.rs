@@ -404,3 +404,133 @@ mod tests {
         assert!(p.set_speed_preset(txt, "bala".into()).is_err());
     }
 }
+
+/// QA: curve math checked against an independent implementation and integral.
+#[cfg(test)]
+mod qa_tests {
+    use super::*;
+
+    /// Independent reference: Fritsch–Carlson monotone cubic Hermite in log2(speed), written from
+    /// the doc comment on `speed_at`, in f64 (no shared code with the engine).
+    fn ref_speed(points: &[(f64, f64)], x: f64) -> f64 {
+        let n = points.len();
+        let x = x.clamp(0.0, 1.0);
+        let i = (0..n - 1).find(|&k| x <= points[k + 1].0).unwrap_or(n - 2);
+        let y: Vec<f64> = points.iter().map(|p| p.1.log2()).collect();
+        let d: Vec<f64> = (0..n - 1).map(|k| (y[k + 1] - y[k]) / (points[k + 1].0 - points[k].0)).collect();
+        let m = |k: usize| if k == 0 { d[0] } else if k == n - 1 { d[n - 2] } else if d[k - 1] * d[k] <= 0.0 { 0.0 } else { 2.0 / (1.0 / d[k - 1] + 1.0 / d[k]) };
+        let h = points[i + 1].0 - points[i].0;
+        let t = (x - points[i].0) / h;
+        let (h00, h10, h01, h11) = (2.0 * t.powi(3) - 3.0 * t * t + 1.0, t.powi(3) - 2.0 * t * t + t, -2.0 * t.powi(3) + 3.0 * t * t, t.powi(3) - t * t);
+        (h00 * y[i] + h10 * h * m(i) + h01 * y[i + 1] + h11 * h * m(i + 1)).exp2().clamp(0.1, 10.0)
+    }
+
+    /// ∫₀¹ span / speed(x) dx by composite Simpson with 4000 panels.
+    fn integral_ms(speed: impl Fn(f64) -> f64, span_ms: f64) -> f64 {
+        let n = 4000;
+        let h = 1.0 / n as f64;
+        let f = |x: f64| span_ms / speed(x);
+        let mut s = f(0.0) + f(1.0);
+        for k in 1..n { s += f(k as f64 * h) * if k % 2 == 1 { 4.0 } else { 2.0 }; }
+        s * h / 3.0
+    }
+
+    fn pts(c: &SpeedCurve) -> Vec<(f64, f64)> { c.points.iter().map(|p| (p.x as f64, p.speed as f64)).collect() }
+
+    fn custom() -> SpeedCurve {
+        SpeedCurve { preset: CUSTOM.into(), points: vec![
+            SpeedPoint { x: 0.0, speed: 0.4 }, SpeedPoint { x: 0.2, speed: 3.0 }, SpeedPoint { x: 0.5, speed: 0.25 },
+            SpeedPoint { x: 0.8, speed: 6.0 }, SpeedPoint { x: 1.0, speed: 1.0 }] }
+    }
+
+    fn all_curves() -> Vec<SpeedCurve> {
+        let mut v: Vec<SpeedCurve> = speed_presets().into_iter().map(|p| p.curve).collect();
+        v.push(custom());
+        v
+    }
+
+    fn one_clip(span: u64) -> (ClioProject, u64) {
+        let p = ClioProject::new("qa".into(), 1080, 1920).unwrap();
+        let v = p.add_track(TrackKind::Video, "V".into());
+        let a = p.append_clip(v, "a".into(), "a.mp4".into(), span).unwrap();
+        p.set_clip_source_info(a, span, 1280, 720);
+        (p, a)
+    }
+
+    #[test]
+    fn engine_interpolation_matches_independent_reference() {
+        for c in all_curves() {
+            let r = pts(&c);
+            for k in 0..=1000 {
+                let x = k as f64 / 1000.0;
+                let (e, w) = (c.speed_at(x as f32) as f64, ref_speed(&r, x));
+                assert!((e - w).abs() <= 1e-3 * w, "{} at {x}: engine {e} vs reference {w}", c.preset);
+            }
+        }
+    }
+
+    #[test]
+    fn no_overshoot_between_points() {
+        for c in all_curves() {
+            for w in c.points.windows(2) {
+                let (lo, hi) = (w[0].speed.min(w[1].speed), w[0].speed.max(w[1].speed));
+                for k in 0..=50 {
+                    let x = w[0].x + (w[1].x - w[0].x) * k as f32 / 50.0;
+                    let s = c.speed_at(x);
+                    assert!(s >= lo * (1.0 - 1e-4) && s <= hi * (1.0 + 1e-4), "{}: {s} outside [{lo},{hi}] at {x}", c.preset);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn clip_duration_is_the_independent_integral() {
+        for span in [1_000u64, 6_000, 10_000, 60_000] {
+            for c in all_curves() {
+                let (p, a) = one_clip(span);
+                p.set_speed_curve(a, c.clone()).unwrap();
+                let got = p.tracks()[0].clips[0].duration_ms as f64;
+                let r = pts(&c);
+                let want = integral_ms(|x| ref_speed(&r, x), span as f64);
+                // 48-segment midpoint plan vs the exact integral: within 1 ms + 0.1 % (sharp custom
+                // curves reach ~0.05 %: 37 ms on 60 s of source).
+                assert!((got - want).abs() <= 1.0 + 1e-3 * want, "{} span {span}: clip {got} ms vs ∫ {want:.2} ms", c.preset);
+                // The playback plan fills that duration and its speeds follow the curve (k ≈ 1).
+                let segs = curve_segments(c.clone(), span, got as u64);
+                let plan: f64 = segs.iter().map(|s| span as f64 / segs.len() as f64 / s.speed as f64).sum();
+                assert!((plan - got).abs() < 1.0, "{} plan {plan} vs {got}", c.preset);
+                for (i, s) in segs.iter().enumerate() {
+                    let x = (i as f64 + 0.5) / segs.len() as f64;
+                    assert!((s.speed as f64 / ref_speed(&r, x) - 1.0).abs() < 2e-3, "{} seg {i}: {} vs {}", c.preset, s.speed, ref_speed(&r, x));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn draft_round_trip_keeps_points_bit_exact() {
+        let (p, a) = one_clip(6_000);
+        p.set_speed_curve(a, custom()).unwrap();
+        let before = p.snapshot().speed_curves;
+        let q = ClioProject::from_draft_json(p.to_draft_json().unwrap()).unwrap();
+        let after = q.snapshot().speed_curves;
+        assert_eq!(before.len(), 1);
+        for (b, c) in before[0].curve.points.iter().zip(&after[0].curve.points) {
+            assert_eq!((b.x.to_bits(), b.speed.to_bits()), (c.x.to_bits(), c.speed.to_bits()));
+        }
+        assert_eq!(before, after);
+        assert_eq!(p.tracks()[0].clips[0].duration_ms, q.tracks()[0].clips[0].duration_ms);
+    }
+
+    #[test]
+    fn undo_redo_restore_exact_points_across_presets_and_custom() {
+        let (p, a) = one_clip(6_000);
+        let mut history = vec![(None, p.tracks()[0].clips[0].duration_ms)];
+        for c in all_curves() {
+            p.set_speed_curve(a, c).unwrap();
+            history.push((p.snapshot().speed_curves.first().map(|c| c.curve.clone()), p.tracks()[0].clips[0].duration_ms));
+        }
+        for k in (0..history.len() - 1).rev() { assert!(p.undo()); assert_eq!((p.snapshot().speed_curves.first().map(|c| c.curve.clone()), p.tracks()[0].clips[0].duration_ms), history[k]); }
+        for k in 1..history.len() { assert!(p.redo()); assert_eq!((p.snapshot().speed_curves.first().map(|c| c.curve.clone()), p.tracks()[0].clips[0].duration_ms), history[k]); }
+    }
+}
