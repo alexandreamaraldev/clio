@@ -34,4 +34,14 @@ class CurveRetimePlannerTest {
         val out = run(3933)
         assertTrue(8_500_000 - out.last() in 0..34_000)
     }
+
+    @Test fun neverEmitsAtOrPastTheNextClipStart() {
+        // Source frames running long past the clip (and an accelerating map) must not spill into the next clip.
+        val p = CurveRetime.Planner(1e6 / 30, 1_000_000) { it * 3.0 }
+        val out = ArrayList<Long>()
+        for (i in 0..120) out += p.onFrame(5_000_000L + i * 33_333)
+        out += p.onEnd()
+        assertTrue(out.isNotEmpty())
+        assertTrue("past end: ${out.last()}", out.all { it < 6_000_000 })
+    }
 }

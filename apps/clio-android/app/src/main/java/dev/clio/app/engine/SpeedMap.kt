@@ -39,15 +39,11 @@ class SpeedMap(srcStartsMs: List<Long>, speeds: List<Float>, private val spanMs:
     }
 
     /**
-     * Export: one provider shared by the video SpeedChangeEffect and the audio processor of an item,
-     * so both follow the same plan; SpeedChangeEffect also reports the item's new duration to the
-     * sequence (getDurationAfterEffectApplied), so later items start at the right time.
+     * Export audio: the speed-changing processor for a curved clip, driven by this map's provider.
+     * Video is retimed by CurveRetime, which also reports the item's duration to the sequence.
      */
     @OptIn(UnstableApi::class)
-    fun exportEffects(): Pair<androidx.media3.effect.SpeedChangeEffect, SpeedChangingAudioProcessor> {
-        val p = provider()
-        return androidx.media3.effect.SpeedChangeEffect(p) to SpeedChangingAudioProcessor(p)
-    }
+    fun exportAudio(): SpeedChangingAudioProcessor = SpeedChangingAudioProcessor(provider())
 
     /** Source ms of every speed change (segment starts after the first), for preview scheduling. */
     val changesSrcMs: List<Long> get() = src.drop(1)

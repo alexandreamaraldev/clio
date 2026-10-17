@@ -136,7 +136,7 @@ class Exporter(private val context: Context) {
             val isImage = MediaKind.isImage(context, c.source)
             val speed = if (isImage) 1f else c.speed
             val curveMap = if (isImage) null else curveMap(c)
-            val curve = curveMap?.exportEffects()
+            val curve = curveMap?.exportAudio()
             val mi = MediaItem.Builder().setUri(c.source).apply {
                 if (!isImage) setClippingConfiguration(MediaItem.ClippingConfiguration.Builder()
                     .setStartPositionMs(c.inMs.toLong()).setEndPositionMs(c.inMs.toLong() + Mix.spanMs(c.durationMs.toLong(), speed)).build())
@@ -168,7 +168,7 @@ class Exporter(private val context: Context) {
             video += OverlayEffect(ImmutableList.copyOf(overlays))
             EditedMediaItem.Builder(mi)
                 .apply { if (isImage) { setDurationUs(c.durationMs.toLong() * 1000); setFrameRate(spec.fps) } }
-                .setEffects(Effects(if (curve != null) audioChain(c, speed, curve.second) else audioChain(c, speed), video))
+                .setEffects(Effects(if (curve != null) audioChain(c, speed, curve) else audioChain(c, speed), video))
                 .build()
         }
         val seqs = mutableListOf(EditedMediaItemSequence(items))

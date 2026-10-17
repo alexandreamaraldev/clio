@@ -48,15 +48,17 @@ internal class CurveRetime(
             val out = ArrayList<Long>()
             while (slot(k) < mid && slot(k) < end) { out += slot(k); k++ }
             held = t
-            return out
+            return out.guarded()
         }
         /** End of the clip: the held frame fills every remaining slot. */
         fun onEnd(): List<Long> {
             if (base == Long.MIN_VALUE) return emptyList()
             val out = ArrayList<Long>()
             while (slot(k) < end) { out += slot(k); k++ }
-            return out
+            return out.guarded()
         }
+        /** Never emit at or past the next clip's start (base + durUs): it would overlap that clip's first frame. */
+        private fun List<Long>.guarded() = filter { it < end }
     }
 
     private class Program(private val plan: Planner) : GlShaderProgram {

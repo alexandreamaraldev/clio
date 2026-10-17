@@ -26,3 +26,13 @@ frame is held to the end. It reports the engine's duration to Media3, so the nex
 the timeline says even when the video track is shorter than the probed span (e.g. 4.000 s of video
 in a 4.023 s file, which made exports ~23 ms short). Engine durations are not snapped (timeline = ∫
 within 5 ms); a 30 fps snap was tried in 8e2be69 and reverted.
+
+## Last-frame hold
+
+CurveRetime fills the clip's output on a fixed frame grid (`base + round(i·step)`) up to the
+engine's curved duration. When the source's video track ends before that (e.g. a track ~23 ms
+shorter than the probed span, or decoder rounding), `onEnd()` repeats the last decoded frame in
+every remaining slot, so the clip never comes out short and the next clip still starts on time.
+No slot is ever emitted at or past `base + durUs` (the next clip's start); the planner filters
+those out (`CurveRetimePlannerTest.neverEmitsAtOrPastTheNextClipStart`). Audio is not padded: the
+speed-changing processor follows the same provider and ends with the source.
