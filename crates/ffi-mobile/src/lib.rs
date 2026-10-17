@@ -15,6 +15,8 @@ mod speed;
 pub use speed::*;
 mod look;
 pub use look::*;
+mod keys;
+pub use keys::*;
 pub use layers::*;
 mod text;
 pub use text::*;
@@ -156,6 +158,9 @@ struct State {
     /// Colour grades of main-track video clips by clip id (phase 4 look).
     #[serde(default)]
     grades: std::collections::BTreeMap<u64, ColorGrade>,
+    /// Keyframes of video clips, stills and layers by clip id (phase 4 keyframes).
+    #[serde(default)]
+    keyframes: std::collections::BTreeMap<u64, KeyTracks>,
     #[serde(skip)]
     history: History,
 }
@@ -174,6 +179,7 @@ struct Snap {
     text_styles: std::collections::BTreeMap<u64, TextStyle>,
     speed_curves: std::collections::BTreeMap<u64, SpeedCurve>,
     grades: std::collections::BTreeMap<u64, ColorGrade>,
+    keyframes: std::collections::BTreeMap<u64, KeyTracks>,
 }
 
 #[derive(Default)]
@@ -186,7 +192,7 @@ const MAX_UNDO: usize = 100;
 
 impl State {
     fn snap(&self) -> Snap {
-        Snap { name: self.project.name.clone(), width: self.width, height: self.height, fill: self.fill, blur_bg: self.blur_bg, next_id: self.next_id, tracks: self.tracks.clone(), captions: self.captions.clone(), text_styles: self.text_styles.clone(), speed_curves: self.speed_curves.clone(), grades: self.grades.clone() }
+        Snap { name: self.project.name.clone(), width: self.width, height: self.height, fill: self.fill, blur_bg: self.blur_bg, next_id: self.next_id, tracks: self.tracks.clone(), captions: self.captions.clone(), text_styles: self.text_styles.clone(), speed_curves: self.speed_curves.clone(), grades: self.grades.clone(), keyframes: self.keyframes.clone() }
     }
     fn restore(&mut self, x: Snap) {
         self.project.name = x.name;
@@ -200,6 +206,7 @@ impl State {
         self.text_styles = x.text_styles;
         self.speed_curves = x.speed_curves;
         self.grades = x.grades;
+        self.keyframes = x.keyframes;
     }
     /// Record the current state before a mutation.
     fn checkpoint(&mut self) {
@@ -252,6 +259,9 @@ pub struct Snapshot {
     /// Non-neutral colour grades by clip (last, with a default, so existing constructors keep working).
     #[uniffi(default = [])]
     pub grades: Vec<ClipGrade>,
+    /// Keyframes by clip (last, with a default, so existing constructors keep working).
+    #[uniffi(default = [])]
+    pub keyframes: Vec<ClipKeyframes>,
 }
 
 /// Draft file format version (bump on breaking changes).
@@ -287,7 +297,7 @@ impl ClioProject {
                 captions: Vec::new(),
                 fill: false,
                 blur_bg: false,
-                text_styles: Default::default(), speed_curves: Default::default(), grades: Default::default(), speech_language: None, history: History::default(),
+                text_styles: Default::default(), speed_curves: Default::default(), grades: Default::default(), keyframes: Default::default(), speech_language: None, history: History::default(),
             }),
         })
     }
@@ -316,6 +326,7 @@ impl ClioProject {
         s.prune_text_styles();
         s.prune_speed_curves();
         s.prune_grades();
+        s.prune_keys();
         #[derive(serde::Serialize)]
         struct DraftRef<'a> { version: u32, state: &'a State }
         serde_json::to_string(&DraftRef { version: DRAFT_VERSION, state: &s }).map_err(|e| ClioError::Serialize { msg: e.to_string() })
@@ -381,6 +392,7 @@ impl ClioProject {
             return Ok(());
         }
         s.checkpoint();
+        let (old_map, old_keys) = (s.time_map(clip_id), s.keyframes.get(&clip_id).cloned());
         let kind = s.tracks[ti].kind;
         let x = &mut s.tracks[ti].clips[ci];
         if kind != TrackKind::Video {
@@ -396,6 +408,7 @@ impl ClioProject {
             x.in_ms = in_ms;
             x.duration_ms = dur;
         }
+        s.retime_keys(&old_map, &old_keys, clip_id);
         s.relayout(ti);
         Ok(())
     }
@@ -431,6 +444,7 @@ impl ClioProject {
         c.start_ms += c.duration_ms;
         s.copy_text_style(clip_id, id);
         s.copy_speed_curve(clip_id, id);
+        s.copy_keys(clip_id, id);
         s.tracks[ti].clips.insert(ci + 1, c);
         s.relayout(ti);
         Ok(id)
@@ -451,12 +465,14 @@ impl ClioProject {
         }
         let span = c.span_ms();
         s.checkpoint();
+        let (old_map, old_keys) = (s.time_map(clip_id), s.keyframes.get(&clip_id).cloned());
         s.speed_curves.remove(&clip_id); // a constant speed replaces any curve
         let x = &mut s.tracks[ti].clips[ci];
         x.speed = speed;
         x.duration_ms = ((span as f64 / speed as f64).round() as u64).max(1);
         x.fade_in_ms = x.fade_in_ms.min(x.duration_ms);
         x.fade_out_ms = x.fade_out_ms.min(x.duration_ms);
+        s.retime_keys(&old_map, &old_keys, clip_id);
         s.relayout(ti);
         Ok(())
     }
@@ -555,6 +571,7 @@ impl ClioProject {
             fill: s.fill,
             blur_bg: s.blur_bg,
             speed_curves: s.clip_speed_curves(),
+            keyframes: s.clip_keyframes(),
         }
     }
 
@@ -581,6 +598,7 @@ impl ClioProject {
         s.prune_text_styles();
         s.prune_speed_curves();
         s.prune_grades();
+        s.prune_keys();
         true
     }
 
@@ -620,6 +638,7 @@ impl ClioProject {
         let mut s = self.st();
         let new_id = s.next_id;
         let before = s.snap();
+        let (old_map, old_keys) = (s.time_map(clip_id), s.keyframes.get(&clip_id).cloned());
         for t in &mut s.tracks {
             if let Some(i) = t.clips.iter().position(|c| c.id == clip_id) {
                 let c = t.clips[i].clone();
@@ -644,6 +663,8 @@ impl ClioProject {
                 s.copy_text_style(clip_id, new_id);
                 s.split_speed_curve(clip_id, new_id);
                 s.copy_grade(clip_id, new_id);
+                s.retime_keys(&old_map, &old_keys, clip_id);
+                s.retime_keys(&old_map, &old_keys, new_id);
                 s.history.undo.push(before);
                 s.history.redo.clear();
                 return Ok(new_id);

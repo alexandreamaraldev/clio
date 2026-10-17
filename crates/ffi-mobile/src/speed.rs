@@ -152,7 +152,7 @@ pub fn segment_count(c: &SpeedCurve, span_ms: u64) -> usize {
 }
 
 /// Source offset (ms, may run past the span at the end speed) reached at timeline offset `t_ms`.
-fn src_at_timeline(curve: &SpeedCurve, span: u64, total: u64, t_ms: f64) -> f64 {
+pub(crate) fn src_at_timeline(curve: &SpeedCurve, span: u64, total: u64, t_ms: f64) -> f64 {
     let segs = curve_segments(curve.clone(), span, total);
     let seg_src = span as f64 / segs.len() as f64;
     let (mut t, mut src) = (0.0f64, 0.0f64);
@@ -269,12 +269,14 @@ impl ClioProject {
         let span = c.span_ms();
         let mean = curve.mean_speed();
         s.checkpoint();
+        let (old_map, old_keys) = (s.time_map(clip_id), s.keyframes.get(&clip_id).cloned());
         let x = &mut s.tracks[ti].clips[ci];
         x.duration_ms = ((span as f64 / mean).round() as u64).max(MIN_CLIP_MS.min(span.max(1)));
         x.speed = (span as f64 / x.duration_ms as f64) as f32;
         x.fade_in_ms = x.fade_in_ms.min(x.duration_ms);
         x.fade_out_ms = x.fade_out_ms.min(x.duration_ms - x.fade_in_ms);
         s.speed_curves.insert(clip_id, curve);
+        s.retime_keys(&old_map, &old_keys, clip_id);
         s.relayout(ti);
         Ok(())
     }
@@ -292,7 +294,9 @@ impl ClioProject {
             return Ok(());
         }
         s.checkpoint();
+        let (old_map, old_keys) = (s.time_map(clip_id), s.keyframes.get(&clip_id).cloned());
         s.speed_curves.remove(&clip_id);
+        s.retime_keys(&old_map, &old_keys, clip_id);
         Ok(())
     }
 }
