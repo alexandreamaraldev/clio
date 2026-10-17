@@ -235,6 +235,11 @@ class SpeedCurveQaE2ETest {
      * Timeline's case: flash_in on the FIRST of two solid clips (red, then blue; 4 s each, made by
      * qa/run-device-qa.sh). Export length must equal the engine timeline AND the independent ∫; the
      * cut must land at ∫(clip A) within one frame, with no black frame and no timestamp gap.
+     *
+     * KNOWN BUG (PR #6, run 38987515843): export is 8000 ms (= unretimed source) vs 7198 ms engine/∫,
+     * blue starts at 3999 ms instead of 3175 ms, and frame timestamps jump 3118 -> 3999 ms (881 ms
+     * hole) plus smaller gaps inside the ramp. Timeline is moving export to SpeedChangeEffect +
+     * SpeedProvider; strict on purpose, do not loosen.
      */
     @Test fun flashInOnFirstClipCutIsSeamless() {
         val red = Uri.fromFile(fixture("clio-red.mp4")); val blue = Uri.fromFile(fixture("clio-blue.mp4"))
