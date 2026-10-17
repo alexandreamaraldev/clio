@@ -84,4 +84,18 @@ class ScreensTest {
     @Test fun captionPresetPop() = preset(ThemeMode.Dark, CaptionStyle.Pop)
     @Test fun captionPresetBounce() = preset(ThemeMode.Dark, CaptionStyle.Bounce)
     @Test fun captionPresetHighlight() = preset(ThemeMode.Light, CaptionStyle.Highlight)
+
+    // Keyframes: Animar panel (keys + ease at the playhead, Zoom/Pan frames) and diamonds on timeline clips.
+    private val keyed = UiClip("Praia", 0f, 4.2f, 7L, source = "x", keyable = true,
+        keys = listOf(UiKey(0f, KeyEase.Suave), UiKey(1.5f, KeyEase.Salto), UiKey(4.2f, KeyEase.Linear)))
+    @Test fun animatePanelKeys() = shot(ThemeMode.Dark) { AnimatePanel(keyed, { 1.5f }) }
+    @Test fun animatePanelZoomPan() = shot(ThemeMode.Light) {
+        AnimatePanel(keyed.copy(keys = listOf(UiKey(0f, KeyEase.Suave), UiKey(4.2f, KeyEase.Linear)),
+            zoomPan = UiZoomPan(UiTransform(x = 0.15f, scale = 1.25f), UiTransform(x = -0.15f, scale = 1.25f))), { 2f })
+    }
+    @Test fun animatePanelNoClip() = shot(ThemeMode.Dark) { AnimatePanel(null, { null }) }
+    @Test fun editorKeyframes() = shot(ThemeMode.Dark) {
+        val t = Samples.tracks.toMutableList(); t[0] = t[0].copy(clips = listOf(keyed) + t[0].clips.drop(1))
+        EditorScreen(ui().copy(tracks = t), { 1.5f })
+    }
 }

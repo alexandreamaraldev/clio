@@ -18,7 +18,11 @@
   vizinhos ou interpolação óptica; gravar em 60/120 fps ajuda.
 - Curvas só em vídeos da trilha principal, com áudio não destacado.
 
-## Frame grid (open)
-Snapping curved durations to a 30 fps grid was tried (8e2be69) and reverted: the QA contract is
-timeline = ∫ within 5 ms, and the flash_in cut got worse (31 ms early instead of 23). The remaining
-drift is on the export side (export ~23 ms shorter than the engine per curved clip), to be fixed there.
+## Frame grid
+Curved clips export through `CurveRetime` (replaces SpeedChangeEffect + FpsCap for them): every
+output slot (1/fps, from the clip start to the engine's clip end) shows the nearest retimed input
+frame, so fast parts drop frames, slow parts repeat them (no pts gap over one frame) and the last
+frame is held to the end. It reports the engine's duration to Media3, so the next item starts where
+the timeline says even when the video track is shorter than the probed span (e.g. 4.000 s of video
+in a 4.023 s file, which made exports ~23 ms short). Engine durations are not snapped (timeline = ∫
+within 5 ms); a 30 fps snap was tried in 8e2be69 and reverted.
