@@ -14,20 +14,22 @@ import androidx.media3.effect.PassthroughShaderProgram
  * every frame, and the simple one rounds 30/24 down to keep 1 in 1. This one also handles VFR input.
  */
 @UnstableApi
-internal class FpsCap(targetFps: Float) : GlEffect {
+/** [smooth]: variable-rate input (speed curves) — never leave a gap the input didn't have (see [Decimator.Smooth]). */
+internal class FpsCap(targetFps: Float, private val smooth: Boolean = false) : GlEffect {
     private val stepUs = (1_000_000.0 / targetFps).toLong()
 
     override fun toGlShaderProgram(context: Context, useHdr: Boolean): GlShaderProgram = object : PassthroughShaderProgram() {
         private var nextUs = Long.MIN_VALUE
+        private val sm = Decimator.Smooth(stepUs)
 
         override fun queueInputFrame(gl: GlObjectsProvider, tex: GlTextureInfo, ptsUs: Long) {
             if (keep(ptsUs)) super.queueInputFrame(gl, tex, ptsUs)
             else { inputListener.onInputFrameProcessed(tex); inputListener.onReadyToAcceptInputFrame() }
         }
-        override fun signalEndOfCurrentInputStream() { super.signalEndOfCurrentInputStream(); nextUs = Long.MIN_VALUE }
-        override fun flush() { super.flush(); nextUs = Long.MIN_VALUE }
+        override fun signalEndOfCurrentInputStream() { super.signalEndOfCurrentInputStream(); nextUs = Long.MIN_VALUE; sm.reset() }
+        override fun flush() { super.flush(); nextUs = Long.MIN_VALUE; sm.reset() }
 
-        private fun keep(ptsUs: Long): Boolean = Decimator.keep(ptsUs, nextUs, stepUs).also { if (it.first) nextUs = it.second }.first
+        private fun keep(ptsUs: Long): Boolean = if (smooth) sm.keep(ptsUs) else Decimator.keep(ptsUs, nextUs, stepUs).also { if (it.first) nextUs = it.second }.first
     }
 
     companion object {
@@ -56,6 +58,27 @@ internal class FpsCap(targetFps: Float) : GlEffect {
     }
 
     internal object Decimator {
+        /**
+         * For variable-rate input (a speed ramp crosses the target rate): keep the frame nearest each
+         * slot, and also keep a frame whenever dropping it would leave a gap > 1.4 steps (the fixed
+         * grid beats against inputs just above the target and drops every few frames).
+         */
+        class Smooth(private val stepUs: Long) {
+            private var slot = Long.MIN_VALUE; private var last = Long.MIN_VALUE; private var prev = Long.MIN_VALUE
+            fun reset() { slot = Long.MIN_VALUE; last = Long.MIN_VALUE; prev = Long.MIN_VALUE }
+            fun keep(pts: Long): Boolean {
+                if (slot == Long.MIN_VALUE) { slot = pts + stepUs; last = pts; prev = pts; return true }
+                val s = (pts - prev).coerceAtLeast(1); prev = pts
+                val keep = pts >= slot - s / 2 || (pts - last) + s > stepUs * 7 / 5
+                if (keep) {
+                    slot = maxOf(slot + stepUs, pts + stepUs / 2)
+                    while (slot - s / 2 <= pts) slot += stepUs
+                    last = pts
+                }
+                return keep
+            }
+        }
+
         /**
          * (keep, next slot). Slots are [stepUs] apart; a frame within a quarter step of
          * the next slot is kept, so jitter doesn't drop on-grid frames (half a step would

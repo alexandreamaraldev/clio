@@ -29,3 +29,20 @@ class SpeedMapTest {
         for (s in listOf(0.1f, 0.3f, 1f, 4f, 10f)) assertEquals(s, yToSpeed(speedToY(s)), 1e-3f * s)
     }
 }
+
+class SmoothDecimatorTest {
+    @Test fun rampAcrossTargetHasNoGapsAndCapsFastParts() {
+        val step = 33_333L
+        val d = dev.clio.app.engine.FpsCap.Decimator.Smooth(step)
+        // Output-time frames of a 30 fps source on a 5x -> 1x ramp.
+        var t = 0.0; var last = -1L; var worst = 0L; var kept = 0; var firstSecond = 0
+        for (i in 0 until 300) {
+            val speed = 5.0 - 4.0 * (i / 300.0)
+            t += 33_333 / speed
+            val pts = t.toLong()
+            if (d.keep(pts)) { if (last >= 0) worst = maxOf(worst, pts - last); last = pts; kept++; if (pts < 1_000_000) firstSecond++ }
+        }
+        org.junit.Assert.assertTrue("gap $worst", worst <= step * 3 / 2)
+        org.junit.Assert.assertTrue("fast part capped: $firstSecond", firstSecond <= 40)
+    }
+}

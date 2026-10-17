@@ -105,7 +105,7 @@ class Exporter(private val context: Context) {
             val video = mutableListOf<androidx.media3.common.Effect>()
             // A speed curve retimes each frame (slow parts hold frames longer; no frame blending).
             if (curve != null) video += curve.first else if (speed != 1f) video += SpeedChangeEffect(speed)
-            if (!isImage && frameDrop && FpsCap.needed(FpsCap.sourceFps(context, Uri.parse(c.source), c.inMs.toLong() * 1000), spec.fps.toFloat(), (if (curve != null) curveMap(c)?.maxSpeed else null) ?: speed)) video += FpsCap(spec.fps.toFloat())
+            if (!isImage && frameDrop && FpsCap.needed(FpsCap.sourceFps(context, Uri.parse(c.source), c.inMs.toLong() * 1000), spec.fps.toFloat(), (if (curve != null) curveMap(c)?.maxSpeed else null) ?: speed)) video += FpsCap(spec.fps.toFloat(), smooth = curve != null)
             video += Presentation.createForWidthAndHeight(spec.width, spec.height,
                 if (snap.fill) Presentation.LAYOUT_SCALE_TO_FIT_WITH_CROP else Presentation.LAYOUT_SCALE_TO_FIT)
             // Blurred background: a pre-blurred still of the clip fills the letterbox bars (the centre is
