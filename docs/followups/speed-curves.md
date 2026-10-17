@@ -17,3 +17,9 @@
   mais tempo, então 0,15x em vídeo de 30 fps fica "travado" (~4,5 fps efetivos). Follow-up: blend entre quadros
   vizinhos ou interpolação óptica; gravar em 60/120 fps ajuda.
 - Curvas só em vídeos da trilha principal, com áudio não destacado.
+
+## Frame grid
+Curved clip lengths are snapped by the engine to whole 30 fps frames (also whole frames at 60 fps),
+so timeline, music/voice-over and export agree and per-clip rounding does not add up. At 24/25 fps
+exports a curved clip can still be off by under one frame of that rate. A split keeps the user's
+cut point (not snapped).

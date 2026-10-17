@@ -441,10 +441,12 @@ class EditorController(app: Application, handle: SavedStateHandle) : AndroidView
     override fun setSpeedPreset(clipId: Long?, preset: String?) = launchEdit(rebuildPlayer = true) {
         target(clipId)?.let { id -> runCatching { if (preset == null) clearSpeedCurve(id) else setSpeedPreset(id, preset) } }
     }.also { if (preset != null) curveAudioNotice(clipId) }.let { }
-    /** Short pt-BR heads-up the first time a clip with sound gets a curve. */
+    /** Clips already told about curve audio this session (undo/redo must not repeat it). */
+    private val curveNoticeShown = mutableSetOf<Long>()
+    /** Short pt-BR heads-up the first time a clip with sound gets a curve (once per clip per session). */
     private fun curveAudioNotice(clipId: Long?) {
         val c = videoClips.firstOrNull { it.id.toLong() == clipId } ?: videoClips.firstOrNull() ?: return
-        if (!c.muted && c.volume > 0f && !speedMaps.containsKey(c.id.toLong())) ui = ui.copy(notice = "Curva de velocidade: o som acompanha a velocidade (o tom muda junto).")
+        if (curveNoticeShown.add(c.id.toLong()) && !c.muted && c.volume > 0f && !speedMaps.containsKey(c.id.toLong())) ui = ui.copy(notice = "Curva de velocidade: o som acompanha a velocidade (o tom muda junto).")
     }
     override fun setSpeedCurve(clipId: Long?, points: List<Pair<Float, Float>>) = launchEdit(rebuildPlayer = true) {
         target(clipId)?.let { id -> runCatching { setSpeedCurve(id, uniffi.clio_ffi.SpeedCurve("personalizado", points.map { uniffi.clio_ffi.SpeedPoint(it.first, it.second) })) } }
