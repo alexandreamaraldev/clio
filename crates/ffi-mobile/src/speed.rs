@@ -660,11 +660,3 @@ mod qa_tests {
         }
     }
 }
-#[cfg(test)]
-mod dump_tmp { use super::*; #[test] fn dump() {
-    let c = speed_presets().into_iter().find(|p| p.curve.preset.contains("flash")).unwrap().curve;
-    let span=4000u64; let mean=c.mean_speed(); let dur=(span as f64/mean).round() as u64;
-    let segs=curve_segments(c, span, dur);
-    let s: Vec<String> = segs.iter().map(|x| format!("{} {}", x.src_ms, x.speed)).collect();
-    std::fs::write("/tmp/segs.txt", format!("{dur}\n{}", s.join("\n"))).unwrap();
-}}
