@@ -1,5 +1,6 @@
 package dev.clio.app
 
+import dev.clio.app.engine.Grades
 import app.cash.paparazzi.DeviceConfig
 import app.cash.paparazzi.Paparazzi
 import androidx.compose.runtime.Composable
@@ -49,6 +50,18 @@ class ScreensTest {
     @Test fun exportProgress() = shot(ThemeMode.Dark) { ExportSheet(dev.clio.app.engine.ExportState.Running(0.62f, "Stories / Reels / TikTok"), {}, {}, {}) }
     private val pip = UiLayer(5, "Selfie", "s.mp4", 1000, 4000, 0, 1f, false, 0, UiTransform(0.45f, 0.5f, 0.4f, 12f, 0.85f))
     private val cuts = listOf(UiCut(1, 0, 4.2f, TransitionStyle.Fade, 0.5f, 3f), UiCut(2, 1, 7.3f, TransitionStyle.None, 0f, 3f))
+    private val lookClip = UiClip("Praia", 0f, 4.2f, id = 1, source = "praia.mp4")
+    private val warm = Grades.NEUTRAL.copy(filter = "quente", intensity = 0.7f)
+    private val tuned = Grades.NEUTRAL.copy(brightness = 0.25f, contrast = 0.1f, saturation = -0.4f, temperature = 0.3f, highlights = -0.2f, shadows = 0.15f)
+    @Test fun filtersPanel() = shot(ThemeMode.Dark) { FiltersPanel(lookClip, warm, {}, {}, {}) }
+    @Test fun filtersPanelNone() = shot(ThemeMode.Light) { FiltersPanel(lookClip, Grades.NEUTRAL, {}, {}, {}) }
+    @Test fun filtersPanelNoClip() = shot(ThemeMode.Dark) { FiltersPanel(null, Grades.NEUTRAL, {}, {}, {}) }
+    @Test fun adjustPanel() = shot(ThemeMode.Dark) { AdjustPanel(lookClip, tuned, {}, {}, {}) }
+    @Test fun adjustPanelLight() = shot(ThemeMode.Light) { AdjustPanel(lookClip, Grades.NEUTRAL, {}, {}, {}) }
+    @Test fun editorFilters() = shot(ThemeMode.Dark) {
+        val t = Samples.tracks.map { tr -> if (tr.kind == "video") tr.copy(clips = tr.clips.mapIndexed { i, c -> c.copy(id = i.toLong() + 1, source = "c$i.mp4") }) else tr }
+        EditorScreen(ui().copy(tracks = t, grades = mapOf(1L to warm)), { 1.0f }, initialTool = TOOL_FILTERS)
+    }
     @Test fun layersPanelEmpty() = shot(ThemeMode.Dark) { LayersPanel(null, {}, { _, _ -> }, {}) }
     @Test fun layersPanelSelected() = shot(ThemeMode.Dark) { LayersPanel(pip, {}, { _, _ -> }, {}) }
     @Test fun layersPanelLight() = shot(ThemeMode.Light) { LayersPanel(pip.copy(transform = UiTransform(-0.3f, -0.2f, 1.2f, -45f, 0.5f)), {}, { _, _ -> }, {}) }

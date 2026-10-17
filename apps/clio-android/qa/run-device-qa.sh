@@ -6,7 +6,7 @@ set -uo pipefail
 APP=$1; TEST=$2; VIDEO=$3; OUT=$4
 PKG=dev.clio.app
 RUNNER=$PKG.test/androidx.test.runner.AndroidJUnitRunner
-TESTS=(EditorE2ETest#fullEditAndExport EditorE2ETest#splitSurvivesRecreateAndReopen ExportMatrixTest#matrix TextCaptionsExportE2ETest#styledTextAndHighlightCaptionsArePainted TextCaptionsExportE2ETest#videoWithAnimatedTextAndKaraokeKeepsStreams ExportLayersBenchTest#bench ExportLayersBenchTest#portraitLayer LayersE2ETest#layerTransformTransitionExport ExportFpsTest#requestedFrameRateIsHonoured AudioMixE2ETest#overlappingLanesExport AudioMixRmsE2ETest#overlappingLanesSoundOnlyInTheirWindows SpeedCurveE2ETest#exportFollowsTheCurve SpeedCurveE2ETest#curvaPanelPresetsAndUndo SpeedCurveQaE2ETest#presetsCustomUndoRedoDraftAndExport SpeedCurveQaE2ETest#flashInOnFirstClipCutIsSeamless)
+TESTS=(EditorE2ETest#fullEditAndExport EditorE2ETest#splitSurvivesRecreateAndReopen ExportMatrixTest#matrix TextCaptionsExportE2ETest#styledTextAndHighlightCaptionsArePainted TextCaptionsExportE2ETest#videoWithAnimatedTextAndKaraokeKeepsStreams ExportLayersBenchTest#bench ExportLayersBenchTest#portraitLayer LayersE2ETest#layerTransformTransitionExport ExportFpsTest#requestedFrameRateIsHonoured AudioMixE2ETest#overlappingLanesExport AudioMixRmsE2ETest#overlappingLanesSoundOnlyInTheirWindows SpeedCurveE2ETest#exportFollowsTheCurve SpeedCurveE2ETest#curvaPanelPresetsAndUndo SpeedCurveQaE2ETest#presetsCustomUndoRedoDraftAndExport SpeedCurveQaE2ETest#flashInOnFirstClipCutIsSeamless Bt709FrameGuardTest#readsKnownBt709LimitedValues Bt709FrameGuardTest#refusesStreamNotTaggedLimited ExportGradeE2ETest#filterAndAdjustmentsArePainted ExportGradeE2ETest#everyPresetAndSliderMatchesReference LookE2ETest#presetsSlidersUndoRedoAndDraft ExportGradeE2ETest#hdrSourcesExportWithGrades ExportColorDiagE2ETest#stillColourPath)
 mkdir -p "$OUT/screens" "$OUT/screenrecord"
 : > "$OUT/results.txt"
 
@@ -39,6 +39,43 @@ if command -v ffmpeg > /dev/null; then
   done
 else
   echo "ffmpeg missing: no red/blue fixtures" | tee -a "$OUT/results.txt"
+fi
+# HDR fixture (HLG): HEVC Main10, BT.2020 primaries, arib-std-b67 transfer. Generated here, never committed.
+HLG="$OUT/clio-hlg.mp4"
+if command -v ffmpeg > /dev/null; then
+  ffmpeg -y -loglevel error -f lavfi -i testsrc2=size=1280x720:rate=30:duration=3 -f lavfi -i sine=frequency=330:sample_rate=44100:duration=3 \
+    -c:v libx265 -pix_fmt yuv420p10le -x265-params "colorprim=bt2020:transfer=arib-std-b67:colormatrix=bt2020nc:log-level=error" \
+    -color_primaries bt2020 -color_trc arib-std-b67 -colorspace bt2020nc -tag:v hvc1 -c:a aac -shortest -movflags +faststart "$HLG" \
+    && adb push "$HLG" /data/local/tmp/clio-hlg.mp4 > /dev/null || echo "HLG fixture generation failed" | tee -a "$OUT/results.txt"
+else
+  echo "ffmpeg missing: no HLG fixture" | tee -a "$OUT/results.txt"
+fi
+# Bt709Frame guard fixture: raw Y'CbCr planes with known BT.709 limited values (3x2 grid of
+# 416x352 patches), encoded tagged bt709/tv plus a full-range (pc) twin. Generated here, never committed.
+if command -v ffmpeg > /dev/null && command -v python3 > /dev/null; then
+  python3 - "$OUT/bt709.yuv" <<'PY'
+import sys
+W, H = 1280, 720
+P = [(126,128,128),(105,107,182),(92,172,107),(218,128,128),(42,128,128),(155,94,71)]
+def cell(x, y): return P[min(y // 352, 1) * 3 + min(x // 416, 2)]
+Y = bytes(cell(x, y)[0] for y in range(H) for x in range(W))
+U = bytes(cell(2*x, 2*y)[1] for y in range(H//2) for x in range(W//2))
+V = bytes(cell(2*x, 2*y)[2] for y in range(H//2) for x in range(W//2))
+open(sys.argv[1], "wb").write((Y + U + V) * 30)
+PY
+  # Input tagged bt709/tv too, so ffmpeg does not convert the planes (exact bytes, checked locally);
+  # the pc twin is the same bitstream with only the range flag/colr changed.
+  C="-colorspace bt709 -color_primaries bt709 -color_trc bt709"
+  ffmpeg -y -loglevel error -f rawvideo -pix_fmt yuv420p -s 1280x720 -r 30 $C -color_range tv -i "$OUT/bt709.yuv" \
+      -c:v libx264 -profile:v high -qp 2 $C -color_range tv -movflags +faststart+write_colr "$OUT/clio-bt709-tv.mp4" \
+    && ffmpeg -y -loglevel error -i "$OUT/clio-bt709-tv.mp4" -c copy -bsf:v h264_metadata=video_full_range_flag=1 -color_range pc \
+      -movflags +faststart+write_colr "$OUT/clio-bt709-pc.mp4" \
+    && adb push "$OUT/clio-bt709-tv.mp4" /data/local/tmp/clio-bt709-tv.mp4 > /dev/null \
+    && adb push "$OUT/clio-bt709-pc.mp4" /data/local/tmp/clio-bt709-pc.mp4 > /dev/null \
+    || echo "bt709 guard fixture failed" | tee -a "$OUT/results.txt"
+  rm -f "$OUT/bt709.yuv"
+else
+  echo "ffmpeg/python3 missing: no Bt709Frame guard fixture" | tee -a "$OUT/results.txt"
 fi
 adb shell rm -rf /sdcard/clio-qa /sdcard/clio-rec; adb shell mkdir -p /sdcard/clio-qa /sdcard/clio-rec
 adb logcat -c

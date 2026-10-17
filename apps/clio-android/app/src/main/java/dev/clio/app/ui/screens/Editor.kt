@@ -65,7 +65,7 @@ private val tools = listOf(
     Tool(Icons.Outlined.Speed, "Velocidade"), Tool(Icons.Outlined.VolumeUp, "Volume"),
     Tool(Icons.Outlined.AspectRatio, "Formato"), Tool(Icons.Outlined.ContentCopy, "Duplicar"),
     Tool(Icons.Outlined.Layers, "Camadas"), Tool(Icons.Outlined.Compare, "Transição"),
-    Tool(Icons.Outlined.Tune, "Ajustes", ready = false), Tool(Icons.Outlined.FilterVintage, "Filtros", ready = false),
+    Tool(Icons.Outlined.FilterVintage, "Filtros"), Tool(Icons.Outlined.Tune, "Ajustes"),
     Tool(Icons.Outlined.AutoAwesome, "Efeitos", ready = false),
 )
 const val TOOL_SPLIT = 0
@@ -78,7 +78,9 @@ const val TOOL_FORMAT = 6
 const val TOOL_DUPLICATE = 7
 const val TOOL_LAYERS = 8
 const val TOOL_TRANSITION = 9
-private val panelTools = setOf(TOOL_TEXT, TOOL_MUSIC, TOOL_CAPTIONS, TOOL_SPEED, TOOL_VOLUME, TOOL_FORMAT, TOOL_LAYERS, TOOL_TRANSITION)
+const val TOOL_FILTERS = 10
+const val TOOL_ADJUST = 11
+private val panelTools = setOf(TOOL_TEXT, TOOL_MUSIC, TOOL_CAPTIONS, TOOL_SPEED, TOOL_VOLUME, TOOL_FORMAT, TOOL_LAYERS, TOOL_TRANSITION, TOOL_FILTERS, TOOL_ADJUST)
 
 @Immutable
 data class TextItem(val id: Long, val text: String, val startMs: Long, val endMs: Long, val style: uniffi.clio_ffi.TextStyle = dev.clio.app.engine.StyledText.fallbackStyle)
@@ -110,6 +112,8 @@ data class EditorUi(
     val notice: String? = null,
     val layers: List<UiLayer> = emptyList(),
     val cuts: List<UiCut> = emptyList(),
+    /** Non-neutral colour grades by clip id. */
+    val grades: Map<Long, uniffi.clio_ffi.ColorGrade> = emptyMap(),
     /** Whisper language; null = auto-detect. */
     val captionLanguage: String? = null,
 )
@@ -155,6 +159,10 @@ interface EditorActions {
     fun addLayer() {}
     fun setLayerTransform(clipId: Long, t: UiTransform) {}
     fun setTransition(clipId: Long, style: TransitionStyle, durS: Float) {}
+    /** Live (uncommitted) grade while a slider moves; null clears it. */
+    fun previewGrade(clipId: Long, grade: uniffi.clio_ffi.ColorGrade?) {}
+    fun setGrade(clipId: Long, grade: uniffi.clio_ffi.ColorGrade) {}
+    fun applyGradeToAll(clipId: Long) {}
 }
 
 object NoActions : EditorActions
@@ -257,6 +265,15 @@ fun EditorScreen(
                 TOOL_TRANSITION -> {
                     val cut = ui.cuts.firstOrNull { it.clipId == selectedClip } ?: ui.cuts.minByOrNull { kotlin.math.abs(it.atS - playhead()) }
                     TransitionPanel(ui.cuts, cut, { selectedClip = it.clipId; actions.scrub((it.atS - 0.8f).coerceAtLeast(0f)) }, actions::setTransition)
+                }
+                TOOL_FILTERS, TOOL_ADJUST -> {
+                    // Main-track clips only for now (layer grades are stored by the engine but not rendered yet).
+                    val clip = target?.takeIf { t -> t.source != null && ui.tracks.any { it.kind == "video" && t in it.clips } }
+                    val g = clip?.let { ui.grades[it.id] } ?: dev.clio.app.engine.Grades.NEUTRAL
+                    val prev = { x: uniffi.clio_ffi.ColorGrade? -> clip?.let { actions.previewGrade(it.id, x) }; Unit }
+                    val commit = { x: uniffi.clio_ffi.ColorGrade -> clip?.let { actions.setGrade(it.id, x) }; Unit }
+                    val all = { clip?.let { actions.applyGradeToAll(it.id) }; Unit }
+                    if (panel == TOOL_FILTERS) FiltersPanel(clip, g, prev, commit, all) else AdjustPanel(clip, g, prev, commit, all)
                 }
                 TOOL_FORMAT -> FormatPanel(ui.canvasW, ui.canvasH, ui.fill, ui.blurBg, actions::setAspect, actions::setFraming)
                 else -> Timeline(ui.tracks, ui.durationS, playhead, ui.playing, selectedClip, { selectedClip = it }, actions::scrub, actions::addClip,

@@ -13,6 +13,8 @@ pub use audio::waveform_peaks;
 mod layers;
 mod speed;
 pub use speed::*;
+mod look;
+pub use look::*;
 pub use layers::*;
 mod text;
 pub use text::*;
@@ -151,6 +153,9 @@ struct State {
     /// Speed curves of main-track clips by clip id (phase 4).
     #[serde(default)]
     speed_curves: std::collections::BTreeMap<u64, SpeedCurve>,
+    /// Colour grades of main-track video clips by clip id (phase 4 look).
+    #[serde(default)]
+    grades: std::collections::BTreeMap<u64, ColorGrade>,
     #[serde(skip)]
     history: History,
 }
@@ -168,6 +173,7 @@ struct Snap {
     captions: Vec<Caption>,
     text_styles: std::collections::BTreeMap<u64, TextStyle>,
     speed_curves: std::collections::BTreeMap<u64, SpeedCurve>,
+    grades: std::collections::BTreeMap<u64, ColorGrade>,
 }
 
 #[derive(Default)]
@@ -180,7 +186,7 @@ const MAX_UNDO: usize = 100;
 
 impl State {
     fn snap(&self) -> Snap {
-        Snap { name: self.project.name.clone(), width: self.width, height: self.height, fill: self.fill, blur_bg: self.blur_bg, next_id: self.next_id, tracks: self.tracks.clone(), captions: self.captions.clone(), text_styles: self.text_styles.clone(), speed_curves: self.speed_curves.clone() }
+        Snap { name: self.project.name.clone(), width: self.width, height: self.height, fill: self.fill, blur_bg: self.blur_bg, next_id: self.next_id, tracks: self.tracks.clone(), captions: self.captions.clone(), text_styles: self.text_styles.clone(), speed_curves: self.speed_curves.clone(), grades: self.grades.clone() }
     }
     fn restore(&mut self, x: Snap) {
         self.project.name = x.name;
@@ -193,6 +199,7 @@ impl State {
         self.captions = x.captions;
         self.text_styles = x.text_styles;
         self.speed_curves = x.speed_curves;
+        self.grades = x.grades;
     }
     /// Record the current state before a mutation.
     fn checkpoint(&mut self) {
@@ -242,9 +249,14 @@ pub struct Snapshot {
     /// Speed curves by clip (last, with a default, so existing constructors keep working).
     #[uniffi(default = [])]
     pub speed_curves: Vec<ClipSpeedCurve>,
+    /// Non-neutral colour grades by clip (last, with a default, so existing constructors keep working).
+    #[uniffi(default = [])]
+    pub grades: Vec<ClipGrade>,
 }
 
 /// Draft file format version (bump on breaking changes).
+/// Draft schema version. New State fields are `#[serde(default)]` (e.g. `grades`), so they stay at 1;
+/// bump only for breaking changes — older apps then refuse newer drafts instead of mis-reading them.
 const DRAFT_VERSION: u32 = 1;
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -275,7 +287,7 @@ impl ClioProject {
                 captions: Vec::new(),
                 fill: false,
                 blur_bg: false,
-                text_styles: Default::default(), speed_curves: Default::default(), speech_language: None, history: History::default(),
+                text_styles: Default::default(), speed_curves: Default::default(), grades: Default::default(), speech_language: None, history: History::default(),
             }),
         })
     }
@@ -303,6 +315,7 @@ impl ClioProject {
         let mut s = self.st();
         s.prune_text_styles();
         s.prune_speed_curves();
+        s.prune_grades();
         #[derive(serde::Serialize)]
         struct DraftRef<'a> { version: u32, state: &'a State }
         serde_json::to_string(&DraftRef { version: DRAFT_VERSION, state: &s }).map_err(|e| ClioError::Serialize { msg: e.to_string() })
@@ -535,6 +548,7 @@ impl ClioProject {
             tracks: s.tracks.clone(),
             captions: s.captions.clone(),
             text_styles: s.styled_texts(),
+            grades: s.clip_grades(),
             speech_language: s.speech_language.clone(),
             can_undo: !s.history.undo.is_empty(),
             can_redo: !s.history.redo.is_empty(),
@@ -566,6 +580,7 @@ impl ClioProject {
         s.clamp_transitions(ti);
         s.prune_text_styles();
         s.prune_speed_curves();
+        s.prune_grades();
         true
     }
 
@@ -628,6 +643,7 @@ impl ClioProject {
                 s.sync_links();
                 s.copy_text_style(clip_id, new_id);
                 s.split_speed_curve(clip_id, new_id);
+                s.copy_grade(clip_id, new_id);
                 s.history.undo.push(before);
                 s.history.redo.clear();
                 return Ok(new_id);
